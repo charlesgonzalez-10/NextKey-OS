@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import ColumnPicker, { useColumnPrefs, ColumnDef } from '@/components/ColumnPicker'
 
 const CATEGORIES = ['All', 'Seller', 'Buyer', 'Investor', 'Wholesaler', 'Agent', 'Lender', 'Other']
 
@@ -13,6 +14,22 @@ const categoryColors: Record<string, string> = {
   Lender: '#B06AE0',
   Other: '#888',
 }
+
+type ColKey =
+  | 'name' | 'category' | 'phone' | 'email'
+  | 'address' | 'source' | 'status' | 'tags' | 'added'
+
+const COLUMNS: ColumnDef<ColKey>[] = [
+  { key: 'name',     label: 'Name',     locked: true },
+  { key: 'category', label: 'Category', defaultVisible: true },
+  { key: 'phone',    label: 'Phone',    defaultVisible: true },
+  { key: 'email',    label: 'Email',    defaultVisible: false },
+  { key: 'address',  label: 'Address',  defaultVisible: false },
+  { key: 'source',   label: 'Source',   defaultVisible: true },
+  { key: 'status',   label: 'Status',   defaultVisible: false },
+  { key: 'tags',     label: 'Tags',     defaultVisible: false },
+  { key: 'added',    label: 'Added',    defaultVisible: true },
+]
 
 interface Contact {
   id: string
@@ -31,6 +48,7 @@ interface Contact {
 export default function ContactsClient({ contacts }: { contacts: Contact[] }) {
   const [search, setSearch] = useState('')
   const [activeCategory, setActiveCategory] = useState('All')
+  const { visible, toggle, reset, isVisible } = useColumnPrefs('contacts', COLUMNS)
 
   const filtered = contacts.filter((c) => {
     const matchesSearch =
@@ -97,46 +115,83 @@ export default function ContactsClient({ contacts }: { contacts: Contact[] }) {
         </div>
       ) : (
         <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
-          <table className="w-full">
-            <thead>
-              <tr style={{ backgroundColor: '#F8F7F4' }}>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Name</th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Category</th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Phone</th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Email</th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Source</th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Added</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {filtered.map((contact) => (
-                <tr
-                  key={contact.id}
-                  className="hover:bg-gray-50 cursor-pointer transition-colors"
-                  onClick={() => window.location.href = `/contacts/${contact.id}`}
-                >
-                  <td className="px-6 py-4">
-                    <p style={{ color: '#0A1F44' }} className="font-semibold text-sm">{contact.name}</p>
-                    {contact.address && <p className="text-gray-400 text-xs mt-0.5">{contact.address}</p>}
-                  </td>
-                  <td className="px-6 py-4">
-                    <span
-                      style={{ backgroundColor: `${categoryColors[contact.category]}20`, color: categoryColors[contact.category] }}
-                      className="px-2.5 py-1 rounded-full text-xs font-semibold"
-                    >
-                      {contact.category}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-sm text-gray-600">{contact.phone || '—'}</td>
-                  <td className="px-6 py-4 text-sm text-gray-600">{contact.email || '—'}</td>
-                  <td className="px-6 py-4 text-xs text-gray-400">{contact.source || '—'}</td>
-                  <td className="px-6 py-4 text-xs text-gray-400">
-                    {new Date(contact.created_at).toLocaleDateString()}
-                  </td>
+          {/* Table toolbar */}
+          <div className="flex items-center justify-between px-6 py-3 border-b border-gray-50">
+            <span className="text-xs text-gray-400">{filtered.length} contacts</span>
+            <ColumnPicker
+              columns={COLUMNS}
+              visible={visible}
+              onToggle={toggle}
+              onReset={reset}
+            />
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr style={{ backgroundColor: '#F8F7F4' }}>
+                  {/* Name always first */}
+                  <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Name</th>
+                  {isVisible('category') && <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Category</th>}
+                  {isVisible('phone')    && <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Phone</th>}
+                  {isVisible('email')    && <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Email</th>}
+                  {isVisible('address')  && <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Address</th>}
+                  {isVisible('source')   && <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Source</th>}
+                  {isVisible('status')   && <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Status</th>}
+                  {isVisible('tags')     && <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Tags</th>}
+                  {isVisible('added')    && <th className="text-left px-6 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Added</th>}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {filtered.map((contact) => (
+                  <tr
+                    key={contact.id}
+                    className="hover:bg-gray-50 cursor-pointer transition-colors"
+                    onClick={() => window.location.href = `/contacts/${contact.id}`}
+                  >
+                    <td className="px-6 py-4">
+                      <p style={{ color: '#0A1F44' }} className="font-semibold text-sm">{contact.name}</p>
+                      {!isVisible('address') && contact.address && (
+                        <p className="text-gray-400 text-xs mt-0.5 truncate max-w-xs">{contact.address}</p>
+                      )}
+                    </td>
+                    {isVisible('category') && (
+                      <td className="px-6 py-4">
+                        <span
+                          style={{ backgroundColor: `${categoryColors[contact.category] || '#888'}20`, color: categoryColors[contact.category] || '#888' }}
+                          className="px-2.5 py-1 rounded-full text-xs font-semibold"
+                        >
+                          {contact.category || '—'}
+                        </span>
+                      </td>
+                    )}
+                    {isVisible('phone')   && <td className="px-6 py-4 text-sm text-gray-600">{contact.phone || '—'}</td>}
+                    {isVisible('email')   && <td className="px-6 py-4 text-sm text-gray-600">{contact.email || '—'}</td>}
+                    {isVisible('address') && <td className="px-6 py-4 text-sm text-gray-600 max-w-xs truncate">{contact.address || '—'}</td>}
+                    {isVisible('source')  && <td className="px-6 py-4 text-xs text-gray-400">{contact.source || '—'}</td>}
+                    {isVisible('status')  && <td className="px-6 py-4 text-xs text-gray-400">{contact.status || '—'}</td>}
+                    {isVisible('tags') && (
+                      <td className="px-6 py-4">
+                        <div className="flex flex-wrap gap-1 max-w-xs">
+                          {(contact.tags || []).slice(0, 3).map(tag => (
+                            <span key={tag} className="px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-500">{tag}</span>
+                          ))}
+                          {(contact.tags || []).length > 3 && (
+                            <span className="px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-400">+{contact.tags.length - 3}</span>
+                          )}
+                        </div>
+                      </td>
+                    )}
+                    {isVisible('added') && (
+                      <td className="px-6 py-4 text-xs text-gray-400">
+                        {new Date(contact.created_at).toLocaleDateString()}
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>
