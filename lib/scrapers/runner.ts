@@ -55,17 +55,35 @@ export async function runScraperFromExistingRun(
   const supabase = getSupabase()
   const results: Record<County, ScraperRunResult> = {} as Record<County, ScraperRunResult>
 
-  // Run all county scrapers in parallel with a hard 90s per-county timeout.
-  // CAPTCHA solve: ≤60s. HTTP requests: ≤30s. Total per county: ≤90s.
-  // Without this, one slow county (e.g. Broward fallback) blocks everything.
-  const COUNTY_TIMEOUT_MS = 90_000
+  // Per-county hard timeout: 150s allows for one CAPTCHA retry (60s × 2 + HTTP).
+  // Without this, one hung county blocks the whole 5-min Lambda budget.
+  const COUNTY_TIMEOUT_MS = 150_000
+
+  // Wrap each county run with: 1 automatic retry on CAPTCHA_UNSOLVABLE errors
+  // (random 2captcha fluke, ~5% rate), then hard timeout as final safety net.
+  const withRetry = async (county: County) => {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        return await runCountyScraper(supabase, county, runId)
+      } catch (err) {
+        const msg = String(err)
+        if (attempt < 2 && (msg.includes('UNSOLVABLE') || msg.includes('isValidSearch'))) {
+          console.log(`[${county}] CAPTCHA failed (attempt ${attempt}) — retrying…`)
+          continue
+        }
+        throw err
+      }
+    }
+    throw new Error(`${county}: max CAPTCHA retries exceeded`)
+  }
+
   console.log(`Running ${counties.join(', ')} scrapers in parallel…`)
   const countyResults = await Promise.allSettled(
     counties.map(county =>
       Promise.race([
-        runCountyScraper(supabase, county, runId),
+        withRetry(county),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`${county} timed out after 90s`)), COUNTY_TIMEOUT_MS)
+          setTimeout(() => reject(new Error(`${county} timed out after 150s`)), COUNTY_TIMEOUT_MS)
         ),
       ])
     )
