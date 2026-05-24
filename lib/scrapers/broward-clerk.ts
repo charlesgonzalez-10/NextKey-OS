@@ -37,11 +37,10 @@ const HEADERS = {
 // Foreclosure case types on Broward civil docket
 const FORECLOSURE_TYPES = ['fore', 'mortgage', 'cace']
 
-// Top FL foreclosure servicers — fallback if broad search returns nothing.
-// Capped at 5 to stay within the 5-min Lambda budget (each needs a CAPTCHA solve).
-const LENDERS = [
-  'NATIONSTAR', 'FREEDOM MORTGAGE', 'NEWREZ', 'PENNYMAC', 'LAKEVIEW LOAN',
-]
+// Fallback disabled — broad date-range search (empty BusiName) should capture
+// all civil filings. Per-lender fallback costs 60s per CAPTCHA solve and blows
+// the 5-min Lambda budget. Re-enable only if broad search is confirmed broken.
+const LENDERS: string[] = []
 
 // Extract all Set-Cookie values from a Response into a single Cookie string
 function extractCookies(res: Response): string {

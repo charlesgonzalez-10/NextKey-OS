@@ -55,10 +55,20 @@ export async function runScraperFromExistingRun(
   const supabase = getSupabase()
   const results: Record<County, ScraperRunResult> = {} as Record<County, ScraperRunResult>
 
-  // Run all county scrapers in parallel — cuts total time from ~5min to ~1-2min
+  // Run all county scrapers in parallel with a hard 90s per-county timeout.
+  // CAPTCHA solve: ≤60s. HTTP requests: ≤30s. Total per county: ≤90s.
+  // Without this, one slow county (e.g. Broward fallback) blocks everything.
+  const COUNTY_TIMEOUT_MS = 90_000
   console.log(`Running ${counties.join(', ')} scrapers in parallel…`)
   const countyResults = await Promise.allSettled(
-    counties.map(county => runCountyScraper(supabase, county, runId))
+    counties.map(county =>
+      Promise.race([
+        runCountyScraper(supabase, county, runId),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`${county} timed out after 90s`)), COUNTY_TIMEOUT_MS)
+        ),
+      ])
+    )
   )
 
   counties.forEach((county, i) => {

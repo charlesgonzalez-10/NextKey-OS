@@ -82,21 +82,41 @@ export async function scrapeMiamiDadeClerk(): Promise<ClerkRecord[]> {
   }
 
   if (!searchData.qs) {
-    // Try alternate searchtype values if first attempt yields no QS
-    console.log('[miami-dade] No QS with INSTRUMENT searchtype, retrying with ADVANCED…')
-    const retryParams = new URLSearchParams({ ...Object.fromEntries(searchParams), searchtype: 'ADVANCED' })
-    const retryRes  = await fetch(`${BASE}/api/home/standardsearch?${retryParams}`, {
+    // isValidSearch:false means the CAPTCHA token was rejected or expired.
+    // Re-solve the CAPTCHA and retry — v3 tokens can be rejected if the score
+    // is too low or if the token was already consumed.
+    console.log('[miami-dade] isValidSearch=false — re-solving CAPTCHA and retrying…')
+    const captchaToken2 = await solveCaptcha({ apiKey, siteKey: SITE_KEY, pageUrl: PAGE_URL, type: 'v3', action: 'officialrecords', minScore: 0.3 })
+
+    // Try STANDARD searchtype on retry
+    const retryParams = new URLSearchParams({ ...Object.fromEntries(searchParams), searchtype: 'STANDARD' })
+    const retryRes = await fetch(`${BASE}/api/home/standardsearch?${retryParams}`, {
       method: 'POST',
-      headers: { ...HEADERS, 'Content-Type': 'application/json', 'x-recaptcha-token': captchaToken },
+      headers: { ...HEADERS, 'Content-Type': 'application/json', 'x-recaptcha-token': captchaToken2 },
       signal: AbortSignal.timeout(30_000),
     })
     const retryText = await retryRes.text()
-    console.log(`[miami-dade] retry status=${retryRes.status} body=${retryText.slice(0, 300)}`)
+    console.log(`[miami-dade] retry (STANDARD) status=${retryRes.status} body=${retryText.slice(0, 300)}`)
     try { searchData = JSON.parse(retryText) } catch { /* keep original */ }
   }
 
   if (!searchData.qs) {
-    throw new Error(`Miami-Dade standardsearch returned no QS token. body=${searchText.slice(0, 300)}`)
+    // Last attempt: ADVANCED searchtype
+    console.log('[miami-dade] Still no QS, trying ADVANCED searchtype…')
+    const retryParams2 = new URLSearchParams({ ...Object.fromEntries(searchParams), searchtype: 'ADVANCED' })
+    const retryRes2 = await fetch(`${BASE}/api/home/standardsearch?${retryParams2}`, {
+      method: 'POST',
+      headers: { ...HEADERS, 'Content-Type': 'application/json', 'x-recaptcha-token': captchaToken },
+      signal: AbortSignal.timeout(30_000),
+    })
+    const retryText2 = await retryRes2.text()
+    console.log(`[miami-dade] retry (ADVANCED) status=${retryRes2.status} body=${retryText2.slice(0, 300)}`)
+    try { searchData = JSON.parse(retryText2) } catch { /* keep original */ }
+  }
+
+  if (!searchData.qs) {
+    console.log('[miami-dade] All searchtype attempts failed — returning 0 records')
+    return []
   }
 
   const qs = searchData.qs

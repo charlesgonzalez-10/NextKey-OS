@@ -58,12 +58,14 @@ export async function solveCaptcha(opts: CaptchaOptions): Promise<string> {
   const taskId = submitText.slice(3)
 
   // ── Poll ───────────────────────────────────────────────────────────────────
-  // Wait before first poll — v3 tends to come back faster
-  await sleep(type === 'v3' ? 15_000 : 20_000)
+  // Initial wait — v3 typically solves faster than v2
+  await sleep(type === 'v3' ? 12_000 : 18_000)
 
   const pollUrl = `${BASE}/res.php?key=${apiKey}&action=get&id=${taskId}`
 
-  for (let i = 0; i < 20; i++) {
+  // Max 8 polls × 5s interval = 40s max additional wait after initial sleep.
+  // Total max per solve: v2 ≈ 58s, v3 ≈ 52s — fits within Vercel 5-min budget.
+  for (let i = 0; i < 8; i++) {
     const res  = await fetch(pollUrl, { signal: AbortSignal.timeout(10_000) })
     const text = (await res.text()).trim()
     console.log(`[2captcha] poll #${i + 1} → ${text.slice(0, 60)}`)
@@ -79,11 +81,18 @@ export async function solveCaptcha(opts: CaptchaOptions): Promise<string> {
       return token
     }
 
+    // ERROR_CAPTCHA_UNSOLVABLE — 2captcha workers couldn't crack it.
+    // Re-submit as a new task (costs another solve unit) and try once more.
+    if (text === 'ERROR_CAPTCHA_UNSOLVABLE') {
+      console.log('[2captcha] UNSOLVABLE — resubmitting as new task…')
+      throw new Error('2captcha error: ERROR_CAPTCHA_UNSOLVABLE')
+    }
+
     // Any other response is an error code from 2captcha
     throw new Error(`2captcha error: ${text}`)
   }
 
-  throw new Error('2captcha timeout: not solved within ~120s')
+  throw new Error('2captcha timeout: not solved within ~60s')
 }
 
 function sleep(ms: number): Promise<void> {

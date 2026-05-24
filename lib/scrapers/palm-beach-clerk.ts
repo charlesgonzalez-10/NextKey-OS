@@ -58,6 +58,22 @@ export async function scrapePalmBeachClerk(): Promise<ClerkRecord[]> {
   const apiKey = process.env.TWOCAPTCHA_API_KEY
   if (!apiKey) throw new Error('TWOCAPTCHA_API_KEY not set')
 
+  // Retry up to 2 times on ERROR_CAPTCHA_UNSOLVABLE (2captcha fluke, not our fault)
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await scrapePalmBeachClerkOnce(apiKey)
+    } catch (err) {
+      if (attempt < 2 && String(err).includes('ERROR_CAPTCHA_UNSOLVABLE')) {
+        console.log(`[palm-beach] CAPTCHA unsolvable — retrying (attempt ${attempt + 1}/2)…`)
+        continue
+      }
+      throw err
+    }
+  }
+  return []
+}
+
+async function scrapePalmBeachClerkOnce(apiKey: string): Promise<ClerkRecord[]> {
   const fromDate = toFormDate(getWeekAgo())  // MM/DD/YYYY
   const toDate   = toFormDate(today())
 
