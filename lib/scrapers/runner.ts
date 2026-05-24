@@ -39,6 +39,20 @@ export async function runScraper(
   }
 
   const runId: string = run.id
+  return runScraperFromExistingRun(runId, counties)
+}
+
+/**
+ * Run the scraper for an already-created scraper_runs record.
+ * Used by /api/scraper/run (the fire-and-forget worker Lambda)
+ * so the trigger can create the record and return instantly while
+ * this function runs to completion in a separate function invocation.
+ */
+export async function runScraperFromExistingRun(
+  runId: string,
+  counties: County[] = ['miami-dade', 'broward', 'palm-beach']
+): Promise<string> {
+  const supabase = getSupabase()
   const results: Record<County, ScraperRunResult> = {} as Record<County, ScraperRunResult>
 
   // Run all county scrapers in parallel — cuts total time from ~5min to ~1-2min

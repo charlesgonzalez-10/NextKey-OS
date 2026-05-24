@@ -37,11 +37,10 @@ const HEADERS = {
 // Foreclosure case types on Broward civil docket
 const FORECLOSURE_TYPES = ['fore', 'mortgage', 'cace']
 
-// Top FL foreclosure servicers — used as fallback if broad search returns nothing
+// Top FL foreclosure servicers — fallback if broad search returns nothing.
+// Capped at 5 to stay within the 5-min Lambda budget (each needs a CAPTCHA solve).
 const LENDERS = [
-  'BANK OF AMERICA', 'WELLS FARGO', 'NATIONSTAR', 'FREEDOM MORTGAGE',
-  'LAKEVIEW LOAN', 'PENNYMAC', 'NEWREZ', 'CARRINGTON', 'SELENE FINANCE',
-  'RUSHMORE LOAN', 'US BANK', 'DEUTSCHE BANK', 'BSI FINANCIAL', 'PLANET HOME',
+  'NATIONSTAR', 'FREEDOM MORTGAGE', 'NEWREZ', 'PENNYMAC', 'LAKEVIEW LOAN',
 ]
 
 // Extract all Set-Cookie values from a Response into a single Cookie string
