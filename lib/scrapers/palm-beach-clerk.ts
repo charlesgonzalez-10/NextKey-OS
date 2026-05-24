@@ -1,234 +1,235 @@
 /**
- * Palm Beach County Clerk — Official Records & eCaseView
- * Searches for lis pendens / foreclosure filings
+ * Palm Beach County Clerk — Official Records (eRecords)
  *
- * Correct URLs (verified):
- * - eCaseView: https://appsgp.mypalmbeachclerk.com/eCaseView/
- * - OR Search: https://www.mypalmbeachclerk.com/official-records
+ * System: Tyler Technologies eRecords (erec.mypalmbeachclerk.com)
+ * Correct domain confirmed: erec.mypalmbeachclerk.com
+ *
+ * Flow (confirmed via live testing):
+ *   1. POST /Search/SetDisclaimer  { isAccepted: true }  → sets disclaimer cookie
+ *   2. GET  /Search                                       → get dynamic data-sitekey
+ *   3. Solve reCAPTCHA v2 with that sitekey
+ *   4. POST /Search/DocumentTypeSearch
+ *        { doctype: "20", beginDate: "MM/DD/YYYY", endDate: "MM/DD/YYYY",
+ *          recordCount: 300, "g-recaptcha-response": "<token>" }
+ *   5. Parse JSON response → array of lis pendens instrument records
+ *
+ * Document type 20 = Lis Pendens (LP) — confirmed via county doc-type list
  */
 
 import * as cheerio from 'cheerio'
 import type { ClerkRecord } from './types'
 import { parseDate, today, getWeekAgo, toFormDate } from './utils'
+import { solveCaptcha } from './captcha'
 
-const ECASEVIEW_URL = 'https://appsgp.mypalmbeachclerk.com/eCaseView'
+const BASE     = 'https://erec.mypalmbeachclerk.com'
+const PAGE_URL = `${BASE}/Search`
+
 const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept':          'application/json, text/html, */*',
   'Accept-Language': 'en-US,en;q=0.9',
+  'Origin':          BASE,
+  'Referer':         `${BASE}/Search`,
 }
 
-// Same lender strategy as Broward for Palm Beach eCaseView
-const LENDERS = [
-  'BANK OF AMERICA',
-  'WELLS FARGO',
-  'NATIONSTAR',
-  'FREEDOM MORTGAGE',
-  'PENNYMAC',
-  'NEWREZ',
-  'US BANK',
-  'DEUTSCHE BANK',
-  'LAKEVIEW LOAN',
-  'CARRINGTON',
-]
+// Extract all Set-Cookie values from a Response into a single Cookie string
+function extractCookies(res: Response): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const setCookieFn = (res.headers as any).getSetCookie
+  const raw: string[] = typeof setCookieFn === 'function'
+    ? setCookieFn.call(res.headers)
+    : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')!] : [])
+  return raw.map(c => c.split(';')[0]).join('; ')
+}
+
+function mergeCookies(existing: string, next: string): string {
+  if (!next) return existing
+  if (!existing) return next
+  // Merge by key, later values win
+  const map = new Map<string, string>()
+  for (const pair of [...existing.split('; '), ...next.split('; ')]) {
+    const [k, ...rest] = pair.split('=')
+    if (k) map.set(k.trim(), rest.join('='))
+  }
+  return [...map.entries()].map(([k, v]) => `${k}=${v}`).join('; ')
+}
 
 export async function scrapePalmBeachClerk(): Promise<ClerkRecord[]> {
-  const allRecords: ClerkRecord[] = []
-  const seen = new Set<string>()
-  const fromDate = getWeekAgo()
-  const toDate   = today()
+  const apiKey = process.env.TWOCAPTCHA_API_KEY
+  if (!apiKey) throw new Error('TWOCAPTCHA_API_KEY not set')
 
-  // Strategy 1: eCaseView search by lender names
-  for (const lender of LENDERS) {
-    try {
-      const records = await searchPalmBeacheCaseView(lender, fromDate, toDate)
-      for (const r of records) {
-        if (!seen.has(r.case_number)) {
-          seen.add(r.case_number)
-          allRecords.push(r)
-        }
-      }
-    } catch (e) {
-      console.log(`Palm Beach lender "${lender}" search error: ${e}`)
-    }
+  const fromDate = toFormDate(getWeekAgo())  // MM/DD/YYYY
+  const toDate   = toFormDate(today())
+
+  // ── Step 1: Accept disclaimer ─────────────────────────────────────────────
+  console.log('[palm-beach] Accepting disclaimer…')
+  const disclaimerRes = await fetch(`${BASE}/Search/SetDisclaimer`, {
+    method:  'POST',
+    headers: { ...HEADERS, 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ isAccepted: true }),
+    signal:  AbortSignal.timeout(15_000),
+  })
+  console.log(`[palm-beach] SetDisclaimer → ${disclaimerRes.status}`)
+
+  let cookies = extractCookies(disclaimerRes)
+
+  // ── Step 2: Load search page → find dynamic sitekey ──────────────────────
+  console.log('[palm-beach] Loading search page for sitekey…')
+  const searchPageRes = await fetch(`${BASE}/Search`, {
+    headers: { ...HEADERS, Cookie: cookies },
+    signal:  AbortSignal.timeout(15_000),
+  })
+  cookies = mergeCookies(cookies, extractCookies(searchPageRes))
+  const searchHtml = await searchPageRes.text()
+
+  const $page    = cheerio.load(searchHtml)
+  let   siteKey  = $page('[data-sitekey]').first().attr('data-sitekey') || ''
+
+  // Also check script tags / inline config for the sitekey
+  if (!siteKey) {
+    const scriptText = $page('script').text()
+    const match = scriptText.match(/['"](6L[A-Za-z0-9_-]{38})['"]/)?.[1]
+    if (match) siteKey = match
   }
 
-  if (allRecords.length > 0) {
-    console.log(`Palm Beach clerk: found ${allRecords.length} cases via lender search`)
-    return allRecords
+  // Hard-code a fallback if page scraping fails (update if it changes)
+  if (!siteKey) {
+    console.log('[palm-beach] WARNING: sitekey not found in page HTML — using known fallback')
+    siteKey = '6LdpHyQTAAAAABDGh09RRhOI3T6f0JoVJFR_IIMM'
   }
 
-  // Strategy 2: Try OR system search for lis pendens instrument type
-  try {
-    const orRecords = await searchPalmBeachOR(fromDate, toDate)
-    if (orRecords.length > 0) {
-      console.log(`Palm Beach OR: found ${orRecords.length} lis pendens`)
-      return orRecords
-    }
-  } catch (e) {
-    console.log(`Palm Beach OR search error: ${e}`)
-  }
+  console.log(`[palm-beach] siteKey=${siteKey.slice(0, 20)}…`)
 
-  console.log('Palm Beach clerk: 0 records found')
-  return allRecords
-}
-
-async function searchPalmBeacheCaseView(
-  partyName: string,
-  fromDate: string,
-  toDate: string
-): Promise<ClerkRecord[]> {
-  const records: ClerkRecord[] = []
-
-  // Try to get the eCaseView search page
-  const initPaths = ['/InitialSearch.aspx', '/Search.aspx', '/CaseSearch.aspx', '/']
-  let workingUrl: string | null = null
-  let initHtml = ''
-
-  for (const path of initPaths) {
-    try {
-      const res = await fetch(`${ECASEVIEW_URL}${path}`, {
-        headers: HEADERS,
-        signal: AbortSignal.timeout(15000),
-      })
-      if (res.ok) {
-        workingUrl = `${ECASEVIEW_URL}${path}`
-        initHtml = await res.text()
-        console.log(`Palm Beach eCaseView: found path ${path}`)
-        break
-      }
-    } catch { continue }
-  }
-
-  if (!workingUrl || !initHtml) {
-    throw new Error('Palm Beach eCaseView: no working search path found')
-  }
-
-  const $init = cheerio.load(initHtml)
-  const viewstate = ($init('#__VIEWSTATE').val() as string) || ''
-  const eventval  = ($init('#__EVENTVALIDATION').val() as string) || ''
-
-  const formData = new URLSearchParams({
-    '__VIEWSTATE': viewstate,
-    '__EVENTVALIDATION': eventval,
-    'ctl00$MainContent$txtLastName': partyName,
-    'ctl00$MainContent$txtFirstName': '',
-    'ctl00$MainContent$txtFromDate': fromDate,
-    'ctl00$MainContent$txtToDate': toDate,
-    'ctl00$MainContent$ddlCaseType': 'CA',  // Civil Action
-    'ctl00$MainContent$btnSearch': 'Search',
+  // ── Step 3: Solve reCAPTCHA v2 ────────────────────────────────────────────
+  console.log('[palm-beach] Solving reCAPTCHA v2…')
+  const captchaToken = await solveCaptcha({
+    apiKey,
+    siteKey,
+    pageUrl: PAGE_URL,
+    type:    'v2',
   })
 
-  const res = await fetch(workingUrl, {
-    method: 'POST',
+  // ── Step 4: Search for document type 20 (Lis Pendens) ────────────────────
+  // Try JSON body first (modern Tyler eRecords API)
+  console.log(`[palm-beach] Searching doc type 20 (LP) from ${fromDate} to ${toDate}…`)
+
+  const jsonBody = {
+    doctype:              '20',
+    beginDate:            fromDate,
+    endDate:              toDate,
+    recordCount:          300,
+    'g-recaptcha-response': captchaToken,
+  }
+
+  const searchRes = await fetch(`${BASE}/Search/DocumentTypeSearch`, {
+    method:  'POST',
     headers: {
       ...HEADERS,
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Referer': workingUrl,
+      'Content-Type': 'application/json',
+      'Cookie':       cookies,
     },
-    body: formData.toString(),
-    signal: AbortSignal.timeout(20000),
+    body:   JSON.stringify(jsonBody),
+    signal: AbortSignal.timeout(30_000),
   })
-  if (!res.ok) return []
 
-  const html = await res.text()
+  let responseText = await searchRes.text()
+  console.log(`[palm-beach] DocumentTypeSearch → ${searchRes.status}, body=${responseText.slice(0, 300)}`)
+
+  // ── Step 4b: Retry as form-encoded (some Tyler builds use form-post) ──────
+  if (!searchRes.ok || responseText.toLowerCase().includes('invalid captcha')) {
+    console.log('[palm-beach] JSON body failed, retrying as form-encoded…')
+
+    // Re-solve CAPTCHA since token was likely consumed
+    const captchaToken2 = await solveCaptcha({ apiKey, siteKey, pageUrl: PAGE_URL, type: 'v2' })
+
+    const formBody = new URLSearchParams({
+      doctype:                '20',
+      beginDate:              fromDate,
+      endDate:                toDate,
+      recordCount:            '300',
+      'g-recaptcha-response': captchaToken2,
+    })
+
+    const formRes = await fetch(`${BASE}/Search/DocumentTypeSearch`, {
+      method:  'POST',
+      headers: {
+        ...HEADERS,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Cookie':       cookies,
+      },
+      body:   formBody.toString(),
+      signal: AbortSignal.timeout(30_000),
+    })
+
+    responseText = await formRes.text()
+    console.log(`[palm-beach] Form retry → ${formRes.status}, body=${responseText.slice(0, 300)}`)
+  }
+
+  // ── Step 5: Parse results ─────────────────────────────────────────────────
+  // Response is usually JSON array or { results: [...] }
+  try {
+    const data = JSON.parse(responseText)
+    const items: Record<string, unknown>[] = Array.isArray(data)
+      ? data
+      : (data.results || data.records || data.data || data.items || [])
+
+    const records: ClerkRecord[] = items.map((item, idx) => {
+      const instrNum  = String(item.instrumentNumber || item.InstrumentNumber || item.caseNumber || `PB-${idx}`)
+      const recDate   = parseDate(String(item.recordedDate || item.RecordedDate || item.fileDate || '')) || today()
+      const grantor   = String(item.grantor || item.Grantor || item.grantorName || item.mortgagor || '')
+      const grantee   = String(item.grantee || item.Grantee || item.granteeName || item.lender || '')
+      const amount    = parseFloat(String(item.consideration || item.amount || '0')) || 0
+
+      return {
+        case_number:        instrNum,
+        file_date:          recDate,
+        plaintiff:          grantee,
+        mortgagor:          grantor,
+        foreclosure_amount: amount,
+        lender_name:        grantee,
+        foreclosure_type:   'P' as const,
+        multiple_liens:     false,
+        county:             'palm-beach' as const,
+      }
+    })
+
+    console.log(`[palm-beach] Parsed ${records.length} lis pendens from JSON`)
+    return records
+  } catch {
+    // Fallback: try HTML table parsing
+    console.log('[palm-beach] Response not JSON, trying HTML parse…')
+    return parsePalmBeachHtml(responseText)
+  }
+}
+
+function parsePalmBeachHtml(html: string): ClerkRecord[] {
   const $ = cheerio.load(html)
+  const records: ClerkRecord[] = []
 
-  $('table tr, #gvResults tr').not(':first').each((_, row) => {
+  $('table tr, #resultsGrid tr').not(':first').each((_, row) => {
     const cells = $(row).find('td')
-    if (cells.length < 4) return
+    if (cells.length < 3) return
 
-    const caseNum  = $(cells[0]).text().trim()
-    const caseType = $(cells[1]).text().trim().toLowerCase()
-    const fileDate = $(cells[2]).text().trim()
-    const parties  = $(cells[3]).text().trim()
+    const instrNum  = $(cells[0]).text().trim()
+    const recDate   = $(cells.length > 2 ? cells[2] : cells[1]).text().trim()
+    const grantor   = $(cells.length > 3 ? cells[3] : cells[0]).text().trim()
+    const grantee   = $(cells.length > 4 ? cells[4] : cells[0]).text().trim()
 
-    if (!caseNum) return
-    if (!caseType.includes('fore') && !caseType.includes('mortgage') && !caseType.includes('civil')) return
-
-    const [plaintiff, mortgagor] = parties.split(/\s+vs?\.?\s+/i)
+    if (!instrNum) return
 
     records.push({
-      case_number:       caseNum,
-      file_date:         parseDate(fileDate) || today(),
-      plaintiff:         plaintiff?.trim() || partyName,
-      mortgagor:         mortgagor?.trim() || '',
+      case_number:        instrNum,
+      file_date:          parseDate(recDate) || today(),
+      plaintiff:          grantee,
+      mortgagor:          grantor,
       foreclosure_amount: 0,
-      lender_name:       partyName,
-      foreclosure_type:  'P',
-      multiple_liens:    false,
-      county:            'palm-beach',
+      lender_name:        grantee,
+      foreclosure_type:   'P' as const,
+      multiple_liens:     false,
+      county:             'palm-beach' as const,
     })
   })
 
+  console.log(`[palm-beach] HTML parse: ${records.length} rows`)
   return records
-}
-
-async function searchPalmBeachOR(fromDate: string, toDate: string): Promise<ClerkRecord[]> {
-  // Try Palm Beach Official Records system — multiple possible URLs
-  const orUrls = [
-    `https://www.mypalmbeachclerk.com/official-records/search?type=LIS+PENDENS&from=${fromDate}&to=${toDate}`,
-    `https://appsgp.mypalmbeachclerk.com/OfficialRecords/Search?instrumentType=LIS+PENDENS&fromDate=${toFormDate(fromDate)}&toDate=${toFormDate(toDate)}`,
-    `https://efts.mypalmbeachclerk.com/EFTS/public/records?type=lis-pendens&start=${fromDate}&end=${toDate}`,
-  ]
-
-  for (const url of orUrls) {
-    try {
-      const res = await fetch(url, {
-        headers: HEADERS,
-        signal: AbortSignal.timeout(15000),
-      })
-      if (!res.ok) continue
-
-      const text = await res.text()
-
-      // Try JSON response first
-      try {
-        const data = JSON.parse(text)
-        const items = Array.isArray(data) ? data : (data.results || data.records || [])
-        if (items.length > 0) {
-          return items.map((item: Record<string, unknown>) => ({
-            case_number: String(item.instrumentNumber || item.caseNumber || item.id || `PB-${Date.now()}`),
-            file_date:   parseDate(String(item.recordedDate || item.fileDate || '')) || today(),
-            plaintiff:   String(item.grantee || item.plaintiff || ''),
-            mortgagor:   String(item.grantor || item.mortgagor || ''),
-            foreclosure_amount: 0,
-            lender_name: String(item.grantee || ''),
-            foreclosure_type: 'P' as const,
-            multiple_liens: false,
-            county: 'palm-beach' as const,
-          }))
-        }
-      } catch { /* not JSON */ }
-
-      // Try HTML parsing
-      const $ = cheerio.load(text)
-      const records: ClerkRecord[] = []
-      $('table tr').not(':first').each((_, row) => {
-        const cells = $(row).find('td')
-        if (cells.length < 3) return
-        const instrumentNum = $(cells[0]).text().trim()
-        const recDate       = $(cells[2]).text().trim()
-        const grantor       = $(cells[3]).text().trim()
-        const grantee       = $(cells[4]).text().trim()
-        if (!instrumentNum) return
-        records.push({
-          case_number: instrumentNum,
-          file_date:   parseDate(recDate) || today(),
-          plaintiff:   grantee,
-          mortgagor:   grantor,
-          foreclosure_amount: 0,
-          lender_name: grantee,
-          foreclosure_type: 'P',
-          multiple_liens: false,
-          county: 'palm-beach',
-        })
-      })
-      if (records.length > 0) return records
-    } catch (e) {
-      console.log(`Palm Beach OR URL ${url} failed: ${e}`)
-    }
-  }
-
-  return []
 }

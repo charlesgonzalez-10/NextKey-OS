@@ -41,23 +41,28 @@ export async function runScraper(
   const runId: string = run.id
   const results: Record<County, ScraperRunResult> = {} as Record<County, ScraperRunResult>
 
-  // Run each county scraper
-  for (const county of counties) {
-    console.log(`Starting ${county} scraper...`)
-    try {
-      results[county] = await runCountyScraper(supabase, county, runId)
-    } catch (err) {
-      console.error(`${county} scraper failed:`, err)
+  // Run all county scrapers in parallel — cuts total time from ~5min to ~1-2min
+  console.log(`Running ${counties.join(', ')} scrapers in parallel…`)
+  const countyResults = await Promise.allSettled(
+    counties.map(county => runCountyScraper(supabase, county, runId))
+  )
+
+  counties.forEach((county, i) => {
+    const r = countyResults[i]
+    if (r.status === 'fulfilled') {
+      results[county] = r.value
+    } else {
+      console.error(`${county} scraper failed:`, r.reason)
       results[county] = {
         county,
         new_leads: 0,
         skipped: 0,
         errors: 1,
-        error_log: [{ reason: String(err) }],
+        error_log: [{ reason: String(r.reason) }],
         skip_log: [],
       }
     }
-  }
+  })
 
   // Aggregate results
   const totalNew     = Object.values(results).reduce((s, r) => s + r.new_leads, 0)

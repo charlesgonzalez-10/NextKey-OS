@@ -1,206 +1,227 @@
 /**
- * Broward County Clerk — Civil Case Search
- * URL: https://www.browardclerk.org/Web2/CaseSearchECA/Index/?AccessLevel=ANONYMOUS
+ * Broward County Clerk — Civil / Foreclosure Case Search
  *
- * Strategy: Search by major foreclosure lender names + date range
- * The Broward search requires a party name — we search the top FL foreclosure servicers
- * to capture the majority of new filings each week.
+ * System: ASP.NET MVC with reCAPTCHA v2
+ * Base:   https://www.browardclerk.org/Web2/CaseSearchECA
+ *
+ * Flow (confirmed via live form inspection):
+ *   1. GET /Index/?AccessLevel=ANONYMOUS — capture __RequestVerificationToken + cookies
+ *   2. Solve reCAPTCHA v2 (sitekey = SITE_KEY below, confirmed from page source)
+ *   3. POST /BusinessSearchResultsCAPTCHA with:
+ *        BusiName, filingDateOnOrAfterB, filingDateOnOrBeforeB,
+ *        __RequestVerificationToken, g-recaptcha-response
+ *   4. Parse HTML table of case results, filter for foreclosure case types
+ *
+ * Strategy: Try a single empty-name date-range search first (1 CAPTCHA solve).
+ * Fall back to per-lender searches only if needed.
  */
 
 import * as cheerio from 'cheerio'
 import type { ClerkRecord } from './types'
 import { parseDate, today, getWeekAgo } from './utils'
+import { solveCaptcha } from './captcha'
 
-const BASE_URL = 'https://www.browardclerk.org/Web2/CaseSearchECA'
-const SEARCH_URL = `${BASE_URL}/Index/?AccessLevel=ANONYMOUS`
+const BASE       = 'https://www.browardclerk.org/Web2/CaseSearchECA'
+const SEARCH_URL = `${BASE}/Index/?AccessLevel=ANONYMOUS`
+const POST_URL   = `${BASE}/BusinessSearchResultsCAPTCHA`
+const SITE_KEY   = '6LeomjoqAAAAANqUs56ZxerFIcoUS1qL14rTH4aF'  // v2, confirmed
+const PAGE_URL   = SEARCH_URL
 
 const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   'Accept-Language': 'en-US,en;q=0.9',
-  'Referer': 'https://www.browardclerk.org/',
+  'Referer':         'https://www.browardclerk.org/',
 }
 
-// Top foreclosure servicers in South Florida — covers ~80% of filings
-// We search each by business name + date range + foreclosure case type
+// Foreclosure case types on Broward civil docket
+const FORECLOSURE_TYPES = ['fore', 'mortgage', 'cace']
+
+// Top FL foreclosure servicers — used as fallback if broad search returns nothing
 const LENDERS = [
-  'BANK OF AMERICA',
-  'WELLS FARGO',
-  'NATIONSTAR',
-  'FREEDOM MORTGAGE',
-  'LAKEVIEW LOAN',
-  'PLANET HOME',
-  'PENNYMAC',
-  'NEWREZ',
-  'CARRINGTON',
-  'SELENE FINANCE',
-  'BSI FINANCIAL',
-  'RUSHMORE LOAN',
-  'US BANK',
-  'DEUTSCHE BANK',
+  'BANK OF AMERICA', 'WELLS FARGO', 'NATIONSTAR', 'FREEDOM MORTGAGE',
+  'LAKEVIEW LOAN', 'PENNYMAC', 'NEWREZ', 'CARRINGTON', 'SELENE FINANCE',
+  'RUSHMORE LOAN', 'US BANK', 'DEUTSCHE BANK', 'BSI FINANCIAL', 'PLANET HOME',
 ]
 
-// Broward foreclosure case types
-const FORECLOSURE_CASE_TYPES = [
-  'Real Prop Homestead Res Fore',
-  'Real Prop Non-Homestead Res Fore',
-  'Real Prop Commercial Foreclosure',
-]
+// Extract all Set-Cookie values from a Response into a single Cookie string
+function extractCookies(res: Response): string {
+  // Node.js 18+ Headers may expose getSetCookie()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const setCookieFn = (res.headers as any).getSetCookie
+  const raw: string[] = typeof setCookieFn === 'function'
+    ? setCookieFn.call(res.headers)
+    : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')!] : [])
+
+  return raw.map(c => c.split(';')[0]).join('; ')
+}
 
 export async function scrapeBrowardClerk(): Promise<ClerkRecord[]> {
-  const allRecords: ClerkRecord[] = []
-  const seen = new Set<string>()
-  const fromDate = getWeekAgo()
+  const apiKey = process.env.TWOCAPTCHA_API_KEY
+  if (!apiKey) throw new Error('TWOCAPTCHA_API_KEY not set')
+
+  const fromDate = getWeekAgo()  // YYYY-MM-DD
   const toDate   = today()
 
-  // First try: search by each lender business name
+  // Broward date inputs are type="date" → expect YYYY-MM-DD
+  const fromForm = fromDate  // already YYYY-MM-DD from getWeekAgo()
+  const toForm   = toDate    // already YYYY-MM-DD from today()
+
+  // ── Step 1: load search page → get CSRF token + cookies ──────────────────
+  console.log(`[broward] Loading search page…`)
+  const initRes = await fetch(SEARCH_URL, {
+    headers: HEADERS,
+    signal:  AbortSignal.timeout(20_000),
+  })
+  if (!initRes.ok) throw new Error(`Broward init page: ${initRes.status}`)
+
+  const cookieJar = extractCookies(initRes)
+  const initHtml  = await initRes.text()
+  const $init     = cheerio.load(initHtml)
+  const csrf      = ($init('input[name="__RequestVerificationToken"]').val() as string) || ''
+
+  console.log(`[broward] CSRF token found: ${csrf ? 'yes' : 'NO'} (${csrf.slice(0, 12)}…)`)
+
+  // Try broad date-range search first (empty BusiName = all filings)
+  const records = await searchBroward(apiKey, '', fromForm, toForm, csrf, cookieJar)
+
+  if (records.length > 0) {
+    console.log(`[broward] Broad search: ${records.length} foreclosure cases`)
+    return records
+  }
+
+  // Fallback: search by each major lender name
+  console.log('[broward] Broad search returned 0 — falling back to per-lender searches')
+  const allRecords: ClerkRecord[] = []
+  const seen = new Set<string>()
+
   for (const lender of LENDERS) {
     try {
-      const records = await searchBrowardByBusiness(lender, fromDate, toDate)
-      for (const r of records) {
+      // Re-load page for fresh CSRF / cookies each time
+      const pageRes = await fetch(SEARCH_URL, {
+        headers: HEADERS,
+        signal: AbortSignal.timeout(20_000),
+      })
+      if (!pageRes.ok) continue
+      const pageCookies = extractCookies(pageRes)
+      const pageHtml    = await pageRes.text()
+      const $page       = cheerio.load(pageHtml)
+      const pageCsrf    = ($page('input[name="__RequestVerificationToken"]').val() as string) || ''
+
+      const lenderRecords = await searchBroward(apiKey, lender, fromForm, toForm, pageCsrf, pageCookies)
+      for (const r of lenderRecords) {
         if (!seen.has(r.case_number)) {
           seen.add(r.case_number)
           allRecords.push(r)
         }
       }
     } catch (e) {
-      console.log(`Broward lender search "${lender}" failed: ${e}`)
+      console.log(`[broward] Lender "${lender}" search error: ${e}`)
     }
   }
 
-  // If lender search yielded results, we're done
-  if (allRecords.length > 0) {
-    console.log(`Broward clerk: found ${allRecords.length} cases via lender search`)
-    return allRecords
-  }
-
-  // Fallback: try the JSON API endpoint some courts expose
-  try {
-    const jsonRecords = await searchBrowardViaAPI(fromDate, toDate)
-    return jsonRecords
-  } catch (e) {
-    console.log(`Broward JSON API fallback failed: ${e}`)
-  }
-
-  console.log('Broward clerk: 0 records found')
+  console.log(`[broward] Per-lender fallback: ${allRecords.length} foreclosure cases`)
   return allRecords
 }
 
-async function searchBrowardByBusiness(
-  businessName: string,
-  fromDate: string,
-  toDate: string
+async function searchBroward(
+  apiKey:    string,
+  busiName:  string,
+  fromDate:  string, // MM/DD/YYYY
+  toDate:    string,
+  csrf:      string,
+  cookies:   string,
 ): Promise<ClerkRecord[]> {
-  const records: ClerkRecord[] = []
-
-  // Get initial page for form tokens
-  const initRes = await fetch(SEARCH_URL, {
-    headers: HEADERS,
-    signal: AbortSignal.timeout(15000),
+  // ── Solve v2 CAPTCHA ─────────────────────────────────────────────────────
+  console.log(`[broward] Solving reCAPTCHA v2 for "${busiName || '<all>'}"…`)
+  const captchaToken = await solveCaptcha({
+    apiKey,
+    siteKey:  SITE_KEY,
+    pageUrl:  PAGE_URL,
+    type:     'v2',
   })
-  if (!initRes.ok) return []
 
-  const initHtml = await initRes.text()
-  const $init = cheerio.load(initHtml)
-  const viewstate    = ($init('#__VIEWSTATE').val() as string) || ''
-  const eventval     = ($init('#__EVENTVALIDATION').val() as string) || ''
-
-  // Submit business name search with date range
+  // ── POST search form ──────────────────────────────────────────────────────
   const formData = new URLSearchParams({
-    '__VIEWSTATE': viewstate,
-    '__EVENTVALIDATION': eventval,
-    '__EVENTTARGET': 'ctl00$cphPage$btnBusinessSearch',
-    'ctl00$cphPage$txtBusinessName': businessName,
-    'ctl00$cphPage$txtBusinessDateFrom': fromDate,
-    'ctl00$cphPage$txtBusinessDateTo': toDate,
-    'ctl00$cphPage$ddlBusinessCourtType': 'Civil',
+    '__RequestVerificationToken': csrf,
+    'CaseCategoryKeys2':          'CV',         // Civil only (foreclosures are civil cases)
+    'BusiName':                   busiName,
+    'filingDateOnOrAfterB':       fromDate,      // YYYY-MM-DD (type="date" field)
+    'filingDateOnOrBeforeB':      toDate,
+    'AccessLevel':                'ANONYMOUS',
+    'g-recaptcha-response':       captchaToken,
   })
 
-  const res = await fetch(SEARCH_URL, {
+  const res = await fetch(POST_URL, {
     method: 'POST',
     headers: {
       ...HEADERS,
       'Content-Type': 'application/x-www-form-urlencoded',
+      'Referer':      SEARCH_URL,
+      'Cookie':       cookies,
     },
-    body: formData.toString(),
-    signal: AbortSignal.timeout(20000),
+    body:   formData.toString(),
+    signal: AbortSignal.timeout(30_000),
   })
-  if (!res.ok) return []
 
   const html = await res.text()
-  const $ = cheerio.load(html)
+  // Log enough of the response to diagnose table structure
+  console.log(`[broward] POST status=${res.status} len=${html.length}`)
+  console.log(`[broward] HTML preview: ${html.replace(/\s+/g, ' ').slice(0, 600)}`)
 
-  // Parse results — try multiple selectors
+  if (!res.ok) {
+    console.log(`[broward] POST failed: ${res.status}`)
+    return []
+  }
+
+  return parseBrowardResults(html, busiName)
+}
+
+function parseBrowardResults(html: string, lenderHint: string): ClerkRecord[] {
+  const $ = cheerio.load(html)
+  const records: ClerkRecord[] = []
+
+  // Try multiple table selectors — Broward result table varies
   const rows = $(
-    '#ctl00_cphPage_gvCases tr, table.case-list tr, .searchResults tr, table tr'
+    '#ctl00_cphPage_gvCases tr, table.case-list tr, .searchResults tr, ' +
+    '#searchResults tr, table.table tr, table tr'
   ).not(':first').toArray()
+
+  console.log(`[broward] Parsing ${rows.length} result rows`)
 
   for (const row of rows) {
     const cells = $(row).find('td')
-    if (cells.length < 4) continue
+    if (cells.length < 3) continue
 
     const caseNum  = $(cells[0]).text().trim()
     const caseType = $(cells[1]).text().trim()
     const fileDate = $(cells[2]).text().trim()
-    const status   = $(cells[3]).text().trim()
+    const parties  = cells.length > 3 ? $(cells[3]).text().trim() : ''
+
+    if (!caseNum || !/^\d{4}-CA-\d+|^\d{2}-\d{4,}/i.test(caseNum)) continue
 
     // Only keep foreclosure case types
-    const isForeclosure = FORECLOSURE_CASE_TYPES.some(t =>
-      caseType.toLowerCase().includes('fore') ||
-      caseType.toLowerCase().includes('mortgage')
-    )
-    if (!isForeclosure || !caseNum) continue
+    const typeLower = caseType.toLowerCase()
+    const isFore    = FORECLOSURE_TYPES.some(t => typeLower.includes(t))
+    if (!isFore) continue
+
+    // Try to split "Plaintiff v. Defendant" from parties column
+    const vsSplit = parties.split(/\s+vs?\.?\s+/i)
+    const plaintiff = vsSplit[0]?.trim() || lenderHint
+    const mortgagor = vsSplit[1]?.trim() || ''
 
     records.push({
-      case_number:       caseNum,
-      file_date:         parseDate(fileDate) || today(),
-      plaintiff:         businessName,
-      mortgagor:         '',   // Not available from this search view — need detail page
+      case_number:        caseNum,
+      file_date:          parseDate(fileDate) || today(),
+      plaintiff,
+      mortgagor,
       foreclosure_amount: 0,
-      lender_name:       businessName,
-      foreclosure_type:  'P',
-      multiple_liens:    false,
-      county:            'broward',
+      lender_name:        plaintiff || lenderHint,
+      foreclosure_type:   'P' as const,
+      multiple_liens:     false,
+      county:             'broward' as const,
     })
   }
 
   return records
-}
-
-async function searchBrowardViaAPI(fromDate: string, toDate: string): Promise<ClerkRecord[]> {
-  // Try Broward's internal API endpoints (some clerk systems expose these)
-  const apiUrls = [
-    `${BASE_URL}/api/cases?filedFrom=${fromDate}&filedTo=${toDate}&caseType=CACE`,
-    `${BASE_URL}/Search?searchType=FiledDate&from=${fromDate}&to=${toDate}&type=CACE&format=json`,
-  ]
-
-  for (const url of apiUrls) {
-    try {
-      const res = await fetch(url, {
-        headers: { ...HEADERS, Accept: 'application/json' },
-        signal: AbortSignal.timeout(10000),
-      })
-      if (!res.ok) continue
-      const data = await res.json()
-      const cases = Array.isArray(data) ? data : (data.cases || data.results || [])
-
-      return cases
-        .filter((c: Record<string, unknown>) => {
-          const type = String(c.caseType || c.CaseType || '').toLowerCase()
-          return type.includes('fore') || type.includes('cace')
-        })
-        .map((c: Record<string, unknown>) => ({
-          case_number: String(c.caseNumber || c.CaseNumber || ''),
-          file_date:   parseDate(String(c.filedDate || c.FiledDate || '')) || today(),
-          plaintiff:   String(c.plaintiff || c.Plaintiff || ''),
-          mortgagor:   String(c.defendant || c.Defendant || ''),
-          foreclosure_amount: 0,
-          lender_name: String(c.plaintiff || c.Plaintiff || ''),
-          foreclosure_type: 'P' as const,
-          multiple_liens: false,
-          county:      'broward' as const,
-        }))
-    } catch { continue }
-  }
-  return []
 }

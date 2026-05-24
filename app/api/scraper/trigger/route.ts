@@ -1,8 +1,11 @@
 /**
  * Manual scraper trigger — called from /scraper admin page
- * Runs in background, returns run ID immediately
+ *
+ * Fire-and-forget: creates the run record, returns the run_id immediately,
+ * then the actual scraping runs via after() so the browser isn't blocked.
  */
 
+import { after } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { runScraper } from '@/lib/scrapers/runner'
@@ -19,11 +22,15 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}))
   const counties: County[] = body.counties || ['miami-dade', 'broward', 'palm-beach']
 
-  try {
-    const runId = await runScraper('manual', counties)
-    return NextResponse.json({ success: true, run_id: runId })
-  } catch (err) {
-    console.error('Manual scraper trigger error:', err)
-    return NextResponse.json({ error: String(err) }, { status: 500 })
-  }
+  // Schedule the actual scraper to run after the response is sent.
+  // The browser gets the run_id instantly; the UI polls /api/scraper/status.
+  after(async () => {
+    try {
+      await runScraper('manual', counties)
+    } catch (err) {
+      console.error('Background scraper error:', err)
+    }
+  })
+
+  return NextResponse.json({ success: true, started: true, counties })
 }

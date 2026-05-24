@@ -1,0 +1,6 @@
+# Miami-Dade bulk sync pipeline
+# Install: pip install -r scripts/requirements.txt
+
+requests>=2.32.0
+supabase>=2.9.0
+python-dotenv>=1.0.0

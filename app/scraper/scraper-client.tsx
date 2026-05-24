@@ -124,13 +124,21 @@ export default function ScraperClient({
   })
   const [tab, setTab] = useState<'runs' | 'leads'>('runs')
 
-  // CSV Import
+  // REIFax CSV Import
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState<{
     total: number; created: number; skipped: number; errors: number
   } | null>(null)
   const [importError, setImportError] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
+
+  // Palm Beach Bulk Import
+  const [bulkImporting, setBulkImporting] = useState(false)
+  const [bulkResult, setBulkResult] = useState<{
+    total: number; file_rows: number; created: number; skipped: number; errors: number
+  } | null>(null)
+  const [bulkError, setBulkError] = useState('')
+  const bulkFileRef = useRef<HTMLInputElement>(null)
 
   // Leads tab state
   const [leads, setLeads] = useState<Lead[]>([])
@@ -192,6 +200,27 @@ export default function ScraperClient({
     } catch (err) {
       setTriggerError(String(err))
     } finally { setTriggering(false) }
+  }
+
+  const handleBulkImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setBulkImporting(true)
+    setBulkError('')
+    setBulkResult(null)
+    const formData = new FormData()
+    formData.append('file', file)
+    try {
+      const res = await fetch('/api/scraper/bulk-import', { method: 'POST', body: formData })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Import failed')
+      setBulkResult(data)
+      router.refresh()
+    } catch (err) { setBulkError(String(err)) }
+    finally {
+      setBulkImporting(false)
+      if (bulkFileRef.current) bulkFileRef.current.value = ''
+    }
   }
 
   const handleCSVImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -380,6 +409,54 @@ export default function ScraperClient({
                     <p className="text-xl font-bold" style={{ color: s.color }}>{s.value}</p>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+
+          {/* Palm Beach Bulk File Import */}
+          <div className="bg-white rounded-2xl border border-gray-100 p-6">
+            <div className="flex items-start justify-between mb-1">
+              <h2 style={{ color: '#0A1F44' }} className="font-bold text-base">Palm Beach Bulk Import</h2>
+              <span className="text-xs px-2 py-0.5 rounded-full font-semibold" style={{ backgroundColor: '#4CAF9A20', color: '#4CAF9A' }}>$40/yr</span>
+            </div>
+            <p className="text-gray-400 text-sm mb-4">
+              Upload the Palm Beach Official Records bulk index file (pipe-delimited).
+              Filters lis pendens automatically — replaces web scraping.
+            </p>
+            <div className="flex items-center gap-4">
+              <label
+                className="cursor-pointer font-bold px-5 py-2.5 rounded-xl text-sm transition-opacity hover:opacity-90"
+                style={{ backgroundColor: bulkImporting ? '#ccc' : '#0A1F44', color: '#C9A84C' }}
+              >
+                {bulkImporting ? '⏳ Processing...' : '📂 Upload Index File'}
+                <input
+                  ref={bulkFileRef}
+                  type="file"
+                  accept=".txt,.csv,.pipe,.dat,.tsv"
+                  className="hidden"
+                  onChange={handleBulkImport}
+                  disabled={bulkImporting}
+                />
+              </label>
+              <p className="text-xs text-gray-400">Pipe-delimited .txt from mypalmbeachclerk.com</p>
+            </div>
+            {bulkError && <p className="text-red-500 text-sm mt-3">{bulkError}</p>}
+            {bulkResult && (
+              <div className="mt-4">
+                <div className="grid grid-cols-4 gap-3">
+                  {[
+                    { label: 'LP Records', value: bulkResult.total,      color: '#0A1F44', bg: '#F8F7F4' },
+                    { label: 'Imported',   value: bulkResult.created,    color: '#4CAF9A', bg: '#4CAF9A10' },
+                    { label: 'Skipped',    value: bulkResult.skipped,    color: '#C9A84C', bg: '#C9A84C10' },
+                    { label: 'Errors',     value: bulkResult.errors,     color: '#E07B6A', bg: '#E07B6A10' },
+                  ].map(s => (
+                    <div key={s.label} className="rounded-xl p-3 text-center" style={{ backgroundColor: s.bg }}>
+                      <p className="text-xs text-gray-400">{s.label}</p>
+                      <p className="text-xl font-bold" style={{ color: s.color }}>{s.value}</p>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-300 mt-2">{bulkResult.file_rows?.toLocaleString()} total rows in file</p>
               </div>
             )}
           </div>
@@ -604,7 +681,7 @@ export default function ScraperClient({
               <p className="text-white/60 text-xs">Sources</p>
               <p className="text-white/80 text-xs mt-1">Miami-Dade Clerk OCS</p>
               <p className="text-white/80 text-xs">Broward Clerk Civil Search</p>
-              <p className="text-white/80 text-xs">Palm Beach Clerk OR Search</p>
+              <p className="text-white/80 text-xs">Palm Beach Bulk Index File</p>
             </div>
             <div className="mt-3 pt-3 border-t border-white/10">
               <p className="text-white/60 text-xs">Replaces</p>
