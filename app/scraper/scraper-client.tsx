@@ -140,6 +140,15 @@ export default function ScraperClient({
   const [bulkError, setBulkError] = useState('')
   const bulkFileRef = useRef<HTMLInputElement>(null)
 
+  // PropStream CSV Import
+  const [propImporting, setPropImporting] = useState(false)
+  const [propResult, setPropResult] = useState<{
+    total: number; file_rows: number; created: number; skipped: number; errors: number
+  } | null>(null)
+  const [propError, setPropError] = useState('')
+  const [propCounty, setPropCounty] = useState('')
+  const propFileRef = useRef<HTMLInputElement>(null)
+
   // Leads tab state
   const [leads, setLeads] = useState<Lead[]>([])
   const [leadsTotal, setLeadsTotal] = useState(0)
@@ -200,6 +209,28 @@ export default function ScraperClient({
     } catch (err) {
       setTriggerError(String(err))
     } finally { setTriggering(false) }
+  }
+
+  const handlePropStreamImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setPropImporting(true)
+    setPropError('')
+    setPropResult(null)
+    const formData = new FormData()
+    formData.append('file', file)
+    if (propCounty) formData.append('county', propCounty)
+    try {
+      const res = await fetch('/api/scraper/propstream-import', { method: 'POST', body: formData })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Import failed')
+      setPropResult(data)
+      router.refresh()
+    } catch (err) { setPropError(String(err)) }
+    finally {
+      setPropImporting(false)
+      if (propFileRef.current) propFileRef.current.value = ''
+    }
   }
 
   const handleBulkImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -409,6 +440,66 @@ export default function ScraperClient({
                     <p className="text-xl font-bold" style={{ color: s.color }}>{s.value}</p>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+
+          {/* PropStream CSV Import */}
+          <div className="bg-white rounded-2xl border border-gray-100 p-6">
+            <div className="flex items-start justify-between mb-1">
+              <h2 style={{ color: '#0A1F44' }} className="font-bold text-base">PropStream Import</h2>
+              <span className="text-xs px-2 py-0.5 rounded-full font-semibold" style={{ backgroundColor: '#7B8FD420', color: '#7B8FD4' }}>$99/mo</span>
+            </div>
+            <p className="text-gray-400 text-sm mb-4">
+              Export pre-foreclosures from PropStream and upload the CSV here.
+              Phones, equity, and property details come pre-filled — no PA lookup needed.
+            </p>
+            <div className="flex items-center gap-3 mb-4 flex-wrap">
+              <select
+                value={propCounty}
+                onChange={e => setPropCounty(e.target.value)}
+                className="text-xs text-gray-600 bg-gray-50 rounded-lg px-3 py-2 focus:outline-none border border-gray-100"
+              >
+                <option value="">County from CSV (auto-detect)</option>
+                <option value="miami-dade">Miami-Dade</option>
+                <option value="broward">Broward</option>
+                <option value="palm-beach">Palm Beach</option>
+              </select>
+              <label
+                className="cursor-pointer font-bold px-5 py-2.5 rounded-xl text-sm transition-opacity hover:opacity-90"
+                style={{ backgroundColor: propImporting ? '#ccc' : '#7B8FD4', color: 'white' }}
+              >
+                {propImporting ? '⏳ Importing...' : '📂 Upload PropStream CSV'}
+                <input
+                  ref={propFileRef}
+                  type="file"
+                  accept=".csv"
+                  className="hidden"
+                  onChange={handlePropStreamImport}
+                  disabled={propImporting}
+                />
+              </label>
+            </div>
+            <p className="text-xs text-gray-300">
+              In PropStream: Lists → Pre-Foreclosure → filter by county → Export CSV
+            </p>
+            {propError && <p className="text-red-500 text-sm mt-3">{propError}</p>}
+            {propResult && (
+              <div className="mt-4">
+                <div className="grid grid-cols-4 gap-3">
+                  {[
+                    { label: 'LP Records', value: propResult.total,   color: '#0A1F44', bg: '#F8F7F4' },
+                    { label: 'Imported',   value: propResult.created, color: '#4CAF9A', bg: '#4CAF9A10' },
+                    { label: 'Skipped',    value: propResult.skipped, color: '#C9A84C', bg: '#C9A84C10' },
+                    { label: 'Errors',     value: propResult.errors,  color: '#E07B6A', bg: '#E07B6A10' },
+                  ].map(s => (
+                    <div key={s.label} className="rounded-xl p-3 text-center" style={{ backgroundColor: s.bg }}>
+                      <p className="text-xs text-gray-400">{s.label}</p>
+                      <p className="text-xl font-bold" style={{ color: s.color }}>{s.value}</p>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-300 mt-2">{propResult.file_rows?.toLocaleString()} total rows in file</p>
               </div>
             )}
           </div>

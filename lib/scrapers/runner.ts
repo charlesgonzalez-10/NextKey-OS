@@ -59,22 +59,34 @@ export async function runScraperFromExistingRun(
   // Without this, one hung county blocks the whole 5-min Lambda budget.
   const COUNTY_TIMEOUT_MS = 150_000
 
-  // Wrap each county run with: 1 automatic retry on CAPTCHA_UNSOLVABLE errors
-  // (random 2captcha fluke, ~5% rate), then hard timeout as final safety net.
-  const withRetry = async (county: County) => {
+  // Wrap each county run with: 1 automatic retry on any CAPTCHA/network error,
+  // then graceful degradation (return empty result, not throw) so one bad county
+  // never kills the whole run.
+  const CAPTCHA_ERRORS = ['UNSOLVABLE', 'timeout', 'isValidSearch', 'CAPTCHA', '2captcha', 'captcha']
+  const isCaptchaErr = (err: unknown) => CAPTCHA_ERRORS.some(k => String(err).includes(k))
+
+  const withRetry = async (county: County): Promise<ScraperRunResult> => {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         return await runCountyScraper(supabase, county, runId)
       } catch (err) {
-        const msg = String(err)
-        if (attempt < 2 && (msg.includes('UNSOLVABLE') || msg.includes('isValidSearch'))) {
-          console.log(`[${county}] CAPTCHA failed (attempt ${attempt}) — retrying…`)
+        if (attempt < 2 && isCaptchaErr(err)) {
+          console.log(`[${county}] CAPTCHA error attempt ${attempt} — retrying: ${String(err).slice(0, 80)}`)
           continue
         }
-        throw err
+        // Graceful degradation: log the error but don't crash the run
+        console.error(`[${county}] failed after ${attempt} attempt(s): ${err}`)
+        return {
+          county,
+          new_leads: 0,
+          skipped: 0,
+          errors: 1,
+          error_log: [{ reason: String(err) }],
+          skip_log: [],
+        }
       }
     }
-    throw new Error(`${county}: max CAPTCHA retries exceeded`)
+    return { county, new_leads: 0, skipped: 0, errors: 1, error_log: [{ reason: 'Max CAPTCHA retries exceeded' }], skip_log: [] }
   }
 
   console.log(`Running ${counties.join(', ')} scrapers in parallel…`)
