@@ -18,7 +18,7 @@ export default async function DealsPage() {
 
   return (
     <DashboardLayout>
-      <DealsClient deals={deals ?? []} />
+      <DealsClient deals={(deals ?? []).filter(Boolean)} />
     </DashboardLayout>
   )
 }

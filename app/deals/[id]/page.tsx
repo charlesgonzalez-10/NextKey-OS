@@ -24,7 +24,7 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
 
   return (
     <DashboardLayout>
-      <DealDetailClient deal={deal} contacts={contacts ?? []} />
+      <DealDetailClient deal={deal} contacts={(contacts ?? []).filter(Boolean)} />
     </DashboardLayout>
   )
 }

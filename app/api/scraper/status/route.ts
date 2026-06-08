@@ -20,18 +20,18 @@ export async function GET() {
   const monthAgo = new Date(); monthAgo.setDate(monthAgo.getDate() - 30)
 
   const { count: weekCount } = await supabase
-    .from('scraper_leads')
+    .from('properties')
     .select('*', { count: 'exact', head: true })
     .gte('created_at', weekAgo.toISOString())
 
   const { count: monthCount } = await supabase
-    .from('scraper_leads')
+    .from('properties')
     .select('*', { count: 'exact', head: true })
     .gte('created_at', monthAgo.toISOString())
 
   // County breakdown
   const { data: countyBreakdown } = await supabase
-    .from('scraper_leads')
+    .from('properties')
     .select('county')
     .gte('created_at', monthAgo.toISOString())
 

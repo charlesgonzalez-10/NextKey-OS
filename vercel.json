@@ -3,6 +3,10 @@
     {
       "path": "/api/cron/scraper",
       "schedule": "0 7 * * 0"
+    },
+    {
+      "path": "/api/cron/ingest-distress",
+      "schedule": "0 13 * * 1-5"
     }
   ]
 }

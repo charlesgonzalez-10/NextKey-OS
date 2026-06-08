@@ -16,7 +16,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { parsePropStreamCSV } from '@/lib/scrapers/propstream-csv'
 import { detectEntityType, calcEquity, isDuplicate } from '@/lib/scrapers/utils'
-import type { EnrichedLead, County } from '@/lib/scrapers/types'
+import type { County } from '@/lib/scrapers/types'
 
 export const dynamic    = 'force-dynamic'
 export const maxDuration = 120  // 2 min — no PA lookups, so 120s is plenty
@@ -92,7 +92,8 @@ export async function POST(request: NextRequest) {
       if (duplicate) { skipped++; continue }
 
       // Equity — use PropStream's values when present; calculate otherwise
-      let finalLead: EnrichedLead = { ...lead }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let finalLead: any = { ...lead }
       if (!finalLead.equity_percentage || !finalLead.equity_dollar_amount) {
         finalLead = { ...finalLead, ...calcEquity(finalLead) }
       }
@@ -101,10 +102,11 @@ export async function POST(request: NextRequest) {
         finalLead.owner_name || finalLead.mortgagor || ''
       )
 
-      const { error: insertErr } = await supabase.from('scraper_leads').insert([{
+      const { data: newProperty, error: insertErr } = await supabase.from('properties').insert([{
         scraper_run_id:       runId,
-        status:               'pending',
+        source:               'csv_import',
         county:               finalLead.county,
+        data_source:          'PropStream',
         case_number:          finalLead.case_number,
         file_date:            finalLead.file_date,
         plaintiff:            finalLead.plaintiff,
@@ -141,18 +143,28 @@ export async function POST(request: NextRequest) {
         phone_1: finalLead.phone_1 || null,
         phone_2: finalLead.phone_2 || null,
         phone_3: finalLead.phone_3 || null,
-        phone_4: finalLead.phone_4 || null,
-        phone_5: finalLead.phone_5 || null,
-      }])
+        phone_4:              finalLead.phone_4 || null,
+        phone_5:              finalLead.phone_5 || null,
+        is_pre_foreclosure:   finalLead.foreclosure_type === 'P',
+        is_auction:           finalLead.foreclosure_type === 'A',
+      }]).select('id').single()
 
-      if (insertErr) {
-        console.error(`[propstream-import] Insert error ${lead.case_number}:`, insertErr.message)
+      if (insertErr || !newProperty) {
+        console.error(`[propstream-import] Insert error ${lead.case_number}:`, insertErr?.message)
         errors++
         continue
       }
 
-      await importToContact(supabase, finalLead)
-      countyNew[finalLead.county]++
+      // Create a lead record
+      await supabase.from('leads').insert([{
+        property_id: newProperty.id,
+        status:      'new',
+        source:      'csv_import',
+      }]).then(({ error }) => {
+        if (error) console.warn('[propstream-import] leads insert failed:', error.message)
+      })
+
+      countyNew[finalLead.county as County]++
       newLeads++
 
     } catch (err) {
@@ -186,59 +198,5 @@ export async function POST(request: NextRequest) {
   })
 }
 
-// ─── Auto-import to contacts ──────────────────────────────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function importToContact(supabase: any, lead: EnrichedLead) {
-  const countyName =
-    lead.county === 'miami-dade' ? 'Miami-Dade' :
-    lead.county === 'broward'    ? 'Broward'    : 'Palm Beach'
-
-  const ownerName = lead.owner_name || lead.mortgagor || 'Unknown Owner'
-
-  const tags = ['pre-foreclosure', lead.county, 'propstream']
-  if (lead.homestead)      tags.push('owner-occupied')
-  if (lead.vacant)         tags.push('vacant')
-  if (lead.multiple_liens) tags.push('multiple-liens')
-  if (lead.equity_tier)    tags.push(`equity-${lead.equity_tier.toLowerCase()}`)
-  if (lead.entity_type && lead.entity_type !== 'Individual') {
-    tags.push(lead.entity_type.toLowerCase().replace(' ', '-'))
-  }
-
-  const notes = [
-    `Pre-Foreclosure — ${countyName} County (PropStream)`,
-    `Case: ${lead.case_number}`,
-    lead.folio_number       ? `Folio/APN: ${lead.folio_number}` : '',
-    lead.file_date          ? `Filed: ${lead.file_date}` : '',
-    lead.plaintiff          ? `Plaintiff: ${lead.plaintiff}` : '',
-    lead.foreclosure_amount ? `Loan Balance: $${lead.foreclosure_amount.toLocaleString()}` : '',
-    lead.equity_tier
-      ? `Equity Tier: ${lead.equity_tier} (${lead.equity_percentage?.toFixed(1)}% / $${lead.equity_dollar_amount?.toLocaleString()})`
-      : '',
-    lead.market_value  ? `Market Value: $${lead.market_value.toLocaleString()}` : '',
-    lead.beds          ? `Beds/Baths: ${lead.beds}/${lead.baths}` : '',
-    lead.year_built    ? `Year Built: ${lead.year_built}` : '',
-  ].filter(Boolean).join('\n')
-
-  const { data: contact } = await supabase
-    .from('contacts')
-    .insert([{
-      name:     ownerName,
-      phone:    lead.phone_1 || '',
-      address:  lead.property_address || '',
-      category: 'Seller',
-      status:   'Active',
-      source:   `County Records — ${countyName} (PropStream)`,
-      tags,
-      notes,
-    }])
-    .select('id')
-    .single()
-
-  if (contact) {
-    await supabase
-      .from('scraper_leads')
-      .update({ status: 'imported', imported_to_contact: contact.id })
-      .eq('case_number', lead.case_number)
-  }
-}
+// NOTE: Auto-import to contacts removed in the unified property architecture.
+// Use the "Add to Pipeline" button on the Leads page to create contacts.

@@ -40,7 +40,8 @@ export default function ColumnPicker<K extends string>({
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen(o => !o)}
-        className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-semibold text-gray-600 hover:border-gray-300 transition-colors"
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
+        style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)', color: 'var(--c-text-2)' }}
         title="Customize visible columns"
       >
         {/* columns / sliders icon */}
@@ -55,14 +56,13 @@ export default function ColumnPicker<K extends string>({
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-1.5 w-56 bg-white rounded-xl shadow-xl border border-gray-100 z-50 overflow-hidden">
-          <div className="flex items-center justify-between px-3 py-2 border-b border-gray-50">
-            <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Columns</span>
-            <button
-              onClick={onReset}
-              className="text-xs font-semibold hover:text-gray-800 transition-colors"
-              style={{ color: '#C9A84C' }}
-            >
+        <div className="absolute right-0 top-full mt-1.5 w-56 rounded-xl shadow-xl z-50 overflow-hidden"
+          style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+          <div className="flex items-center justify-between px-3 py-2"
+            style={{ borderBottom: '1px solid var(--c-border)' }}>
+            <span className="text-xs font-bold uppercase tracking-wider" style={{ color: 'var(--c-text-2)' }}>Columns</span>
+            <button onClick={onReset} className="text-xs font-semibold transition-colors"
+              style={{ color: '#C9A84C' }}>
               Reset
             </button>
           </div>
@@ -71,9 +71,12 @@ export default function ColumnPicker<K extends string>({
             {columns.map(col => (
               <label
                 key={col.key}
-                className={`flex items-center gap-2.5 px-3 py-1.5 select-none ${
-                  col.locked ? 'cursor-default opacity-40' : 'cursor-pointer hover:bg-gray-50'
+                className={`flex items-center gap-2.5 px-3 py-1.5 select-none transition-colors ${
+                  col.locked ? 'cursor-default opacity-40' : 'cursor-pointer'
                 }`}
+                style={{ ':hover': { backgroundColor: 'var(--c-hover)' } } as React.CSSProperties}
+                onMouseEnter={e => !col.locked && (e.currentTarget.style.backgroundColor = 'var(--c-hover)')}
+                onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
               >
                 <input
                   type="checkbox"
@@ -82,9 +85,9 @@ export default function ColumnPicker<K extends string>({
                   onChange={() => !col.locked && onToggle(col.key)}
                   className="w-3.5 h-3.5 rounded accent-yellow-500 flex-shrink-0"
                 />
-                <span className="text-sm text-gray-700 truncate">{col.label}</span>
+                <span className="text-sm truncate" style={{ color: 'var(--c-primary)' }}>{col.label}</span>
                 {col.locked && (
-                  <span className="ml-auto text-xs text-gray-300 flex-shrink-0">fixed</span>
+                  <span className="ml-auto text-xs flex-shrink-0" style={{ color: 'var(--c-text-3)' }}>fixed</span>
                 )}
               </label>
             ))}

@@ -1,0 +1,134 @@
+/**
+ * POST /api/leads/add-to-pipeline
+ * Body: { lead_id: string }  (lead_id = properties.id for backward compat)
+ *
+ * Creates a Contact from a property record and links it to both the property
+ * and its lead record. This is "I want to actively reach out to this owner."
+ *
+ * Flow:
+ *  1. Fetch property from properties table
+ *  2. Create contact record (people CRM)
+ *  3. Update leads.imported_to_contact
+ *  4. Update contacts.property_id (link contact back to property)
+ */
+import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@/lib/supabase/server'
+import { createClient as createServiceClient } from '@supabase/supabase-js'
+
+export const dynamic = 'force-dynamic'
+
+const service = createServiceClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+)
+
+export async function POST(req: NextRequest) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const { lead_id } = await req.json()
+  if (!lead_id) return NextResponse.json({ error: 'lead_id required' }, { status: 400 })
+
+  // Fetch property (lead_id = properties.id for backward compat)
+  const { data: property, error: fetchErr } = await service
+    .from('properties')
+    .select('*')
+    .eq('id', lead_id)
+    .single()
+
+  if (fetchErr || !property) {
+    return NextResponse.json({ error: 'Property not found' }, { status: 404 })
+  }
+
+  // Check if a lead record exists and is already imported
+  const { data: lead } = await service
+    .from('leads')
+    .select('id, imported_to_contact')
+    .eq('property_id', lead_id)
+    .maybeSingle()
+
+  if (lead?.imported_to_contact) {
+    return NextResponse.json({ ok: true, contact_id: lead.imported_to_contact, already: true })
+  }
+
+  const countyName =
+    property.county === 'miami-dade' ? 'Miami-Dade' :
+    property.county === 'broward'    ? 'Broward'     : 'Palm Beach'
+
+  const ownerName = property.owner_name || property.mortgagor || 'Unknown Owner'
+
+  // Build tags from property data
+  const tags: string[] = ['pre-foreclosure', property.county]
+  if (property.data_source)   tags.push(property.data_source.toLowerCase().replace(/\s+/g, '-'))
+  if (property.homestead)     tags.push('owner-occupied')
+  if (property.vacant)        tags.push('vacant')
+  if (property.multiple_liens) tags.push('multiple-liens')
+  if (property.equity_tier)   tags.push(`equity-${property.equity_tier.toLowerCase()}`)
+  if (property.entity_type && property.entity_type !== 'Individual') {
+    tags.push(property.entity_type.toLowerCase().replace(/\s+/g, '-'))
+  }
+
+  // Build notes summary
+  const notes = [
+    `Pre-Foreclosure — ${countyName} County`,
+    property.data_source          ? `Source: ${property.data_source}`                                                  : '',
+    property.case_number          ? `Case: ${property.case_number}`                                                    : '',
+    property.folio_number         ? `Folio/APN: ${property.folio_number}`                                              : '',
+    property.file_date            ? `Filed: ${property.file_date}`                                                     : '',
+    property.plaintiff            ? `Plaintiff: ${property.plaintiff}`                                                 : '',
+    property.foreclosure_amount   ? `Loan Balance: $${Number(property.foreclosure_amount).toLocaleString()}`           : '',
+    property.equity_tier
+      ? `Equity: ${property.equity_tier} (${Number(property.equity_percentage ?? 0).toFixed(1)}% / $${Number(property.equity_dollar_amount ?? 0).toLocaleString()})`
+      : '',
+    property.market_value         ? `Market Value: $${Number(property.market_value).toLocaleString()}`                : '',
+    property.beds                 ? `Beds/Baths: ${property.beds}/${property.baths}`                                   : '',
+    property.year_built           ? `Year Built: ${property.year_built}`                                               : '',
+    property.property_type        ? `Type: ${property.property_type}`                                                  : '',
+  ].filter(Boolean).join('\n')
+
+  // Create the contact (people record)
+  const { data: contact, error: contactErr } = await service
+    .from('contacts')
+    .insert([{
+      name:        ownerName,
+      phone:       property.phone_1 || '',
+      address:     property.property_address || '',
+      city:        property.city  || '',
+      zip:         property.zip   || '',
+      category:    'Seller',
+      status:      'Active',
+      source:      `${property.data_source || 'Property Search'} — ${countyName}`,
+      property_id: lead_id,  // link contact to property
+      tags,
+      notes,
+    }])
+    .select('id')
+    .single()
+
+  if (contactErr || !contact) {
+    return NextResponse.json({ error: contactErr?.message || 'Failed to create contact' }, { status: 500 })
+  }
+
+  // Update the lead record: mark as imported + link to contact
+  if (lead) {
+    await service
+      .from('leads')
+      .update({
+        imported_to_contact: contact.id,
+        status:              'reviewing',
+        updated_at:          new Date().toISOString(),
+      })
+      .eq('property_id', lead_id)
+  } else {
+    // Create lead record if it doesn't exist yet
+    await service.from('leads').insert([{
+      property_id:         lead_id,
+      status:              'reviewing',
+      source:              property.source || 'manual',
+      imported_to_contact: contact.id,
+    }])
+  }
+
+  return NextResponse.json({ ok: true, contact_id: contact.id })
+}

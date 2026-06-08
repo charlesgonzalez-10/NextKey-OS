@@ -29,12 +29,19 @@ export default async function ContactDetailPage({ params }: { params: Promise<{ 
     .eq('contact_id', id)
     .order('created_at', { ascending: false })
 
+  const { data: messagesRaw } = await supabase
+    .from('messages')
+    .select('id, direction, body, status, created_at')
+    .eq('contact_id', id)
+    .order('created_at', { ascending: true })
+
   return (
     <DashboardLayout>
       <ContactDetailClient
         contact={contact}
-        activities={activities ?? []}
-        deals={deals ?? []}
+        activities={(activities ?? []).filter(Boolean)}
+        deals={(deals ?? []).filter(Boolean)}
+        messages={(messagesRaw ?? []).filter((m): m is NonNullable<typeof m> => m != null)}
       />
     </DashboardLayout>
   )

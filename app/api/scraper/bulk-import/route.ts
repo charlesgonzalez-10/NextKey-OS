@@ -90,11 +90,12 @@ export async function POST(request: NextRequest) {
       // Entity type detection
       lead.entity_type = detectEntityType(lead.owner_name || lead.mortgagor || '')
 
-      // Insert into scraper_leads
-      const { error: insertErr } = await supabase.from('scraper_leads').insert([{
+      // Insert into properties (unified property database)
+      const { data: newProperty, error: insertErr } = await supabase.from('properties').insert([{
         scraper_run_id:     runId,
-        status:             'pending',
+        source:             'scraper',
         county:             'palm-beach',
+        data_source:        'Palm Beach Bulk',
         case_number:        lead.case_number,
         file_date:          lead.file_date,
         plaintiff:          lead.plaintiff,
@@ -137,16 +138,25 @@ export async function POST(request: NextRequest) {
         equity_dollar_amount: lead.equity_dollar_amount || null,
         equity_tier:        lead.equity_tier || null,
         entity_type:        lead.entity_type,
-      }])
+        is_pre_foreclosure: lead.foreclosure_type === 'P',
+        is_auction:         lead.foreclosure_type === 'A',
+      }]).select('id').single()
 
-      if (insertErr) {
-        console.error(`[bulk-import] Insert error for ${record.case_number}:`, insertErr.message)
+      if (insertErr || !newProperty) {
+        console.error(`[bulk-import] Insert error for ${record.case_number}:`, insertErr?.message)
         errors++
         continue
       }
 
-      // Auto-import to contacts
-      await importBulkLeadToContact(supabase, lead)
+      // Create a lead record
+      await supabase.from('leads').insert([{
+        property_id: newProperty.id,
+        status:      'new',
+        source:      'scraper',
+      }]).then(({ error }) => {
+        if (error) console.warn('[bulk-import] leads insert failed:', error.message)
+      })
+
       newLeads++
 
     } catch (err) {
@@ -180,50 +190,5 @@ export async function POST(request: NextRequest) {
   })
 }
 
-// ─── Auto-import bulk lead → contacts ─────────────────────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function importBulkLeadToContact(supabase: any, lead: EnrichedLead) {
-  const ownerName = lead.owner_name || lead.mortgagor || 'Unknown Owner'
-
-  const tags = ['pre-foreclosure', 'palm-beach', 'bulk-import']
-  if (lead.homestead)   tags.push('owner-occupied')
-  if (lead.vacant)      tags.push('vacant')
-  if (lead.multiple_liens) tags.push('multiple-liens')
-  if (lead.equity_tier) tags.push(`equity-${lead.equity_tier.toLowerCase()}`)
-  if (lead.entity_type && lead.entity_type !== 'Individual') {
-    tags.push(lead.entity_type.toLowerCase().replace(' ', '-'))
-  }
-
-  const notesLines = [
-    'Pre-Foreclosure — Palm Beach County (Bulk Import)',
-    `Case/CFN: ${lead.case_number}`,
-    lead.folio_number    ? `Folio: ${lead.folio_number}` : '',
-    lead.file_date       ? `Filed: ${lead.file_date}` : '',
-    lead.plaintiff       ? `Plaintiff: ${lead.plaintiff}` : '',
-    lead.foreclosure_amount ? `Foreclosure Amount: $${lead.foreclosure_amount.toLocaleString()}` : '',
-    lead.equity_tier ? `Equity Tier: ${lead.equity_tier} (${lead.equity_percentage}% / $${lead.equity_dollar_amount?.toLocaleString()})` : '',
-    lead.assessed_value  ? `Assessed Value: $${lead.assessed_value.toLocaleString()}` : '',
-    lead.beds            ? `Beds/Baths: ${lead.beds}/${lead.baths}` : '',
-    lead.year_built      ? `Year Built: ${lead.year_built}` : '',
-    lead.subdivision_name ? `Subdivision: ${lead.subdivision_name}` : '',
-  ].filter(Boolean).join('\n')
-
-  const { data: contact } = await supabase.from('contacts').insert([{
-    name:     ownerName,
-    phone:    lead.phone_1 || '',
-    address:  lead.property_address || '',
-    category: 'Seller',
-    status:   'Active',
-    source:   'County Records — Palm Beach (Bulk)',
-    tags,
-    notes:    notesLines,
-  }]).select('id').single()
-
-  if (contact) {
-    await supabase
-      .from('scraper_leads')
-      .update({ status: 'imported', imported_to_contact: contact.id })
-      .eq('case_number', lead.case_number)
-  }
-}
+// NOTE: Auto-import to contacts removed in the unified property architecture.
+// Use the "Add to Pipeline" button on the Leads page to create contacts.

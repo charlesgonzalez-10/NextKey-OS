@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#0A1F44"/>
+  <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
+    font-family="system-ui, -apple-system, sans-serif"
+    font-weight="800" font-size="216" letter-spacing="-8"
+    fill="#C9A84C">NK</text>
+</svg>

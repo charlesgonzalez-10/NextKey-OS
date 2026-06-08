@@ -104,7 +104,7 @@ export function toFormDate(isoDate: string): string {
 
 // ─── Duplicate Detection ──────────────────────────────────────────────────────
 
-// Returns true if the folio or case already exists in our DB
+// Returns true if the folio or case already exists in the unified properties DB.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function isDuplicate(
   supabase: any,
@@ -112,24 +112,16 @@ export async function isDuplicate(
 ): Promise<{ duplicate: boolean; reason?: string }> {
   if (folio_number) {
     const { data } = await supabase
-      .from('scraper_leads')
+      .from('properties')
       .select('id')
       .eq('folio_number', folio_number)
       .maybeSingle()
     if (data) return { duplicate: true, reason: `Folio ${folio_number} already exists` }
-
-    // Also check contacts table
-    const { data: contact } = await supabase
-      .from('contacts')
-      .select('id')
-      .ilike('notes', `%folio:${folio_number}%`)
-      .maybeSingle()
-    if (contact) return { duplicate: true, reason: `Folio ${folio_number} already in contacts` }
   }
 
   if (case_number) {
     const { data } = await supabase
-      .from('scraper_leads')
+      .from('properties')
       .select('id')
       .eq('case_number', case_number)
       .maybeSingle()

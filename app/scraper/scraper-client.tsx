@@ -128,8 +128,10 @@ export default function ScraperClient({
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState<{
     total: number; created: number; skipped: number; errors: number
+    debug?: { detected_headers?: string[]; first_error?: { reason: string; address?: string } | null; first_skip?: { reason: string; address?: string } | null }
   } | null>(null)
   const [importError, setImportError] = useState('')
+  const [importCounty, setImportCounty] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
   // Palm Beach Bulk Import
@@ -161,7 +163,7 @@ export default function ScraperClient({
   const [leadsLoaded, setLeadsLoaded] = useState(false)
 
   const { visible: leadCols, toggle: toggleLeadCol, reset: resetLeadCols, isVisible: isLeadColVisible } =
-    useColumnPrefs<LeadCol>('scraper_leads', LEAD_COLUMNS)
+    useColumnPrefs<LeadCol>('properties', LEAD_COLUMNS)
 
   const fetchLeads = useCallback(async (page = 1, search = leadsSearch, county = leadsCounty, equity = leadsEquity) => {
     setLeadsLoading(true)
@@ -262,6 +264,7 @@ export default function ScraperClient({
     setImportResult(null)
     const formData = new FormData()
     formData.append('file', file)
+    if (importCounty) formData.append('county', importCounty)
     try {
       const res = await fetch('/api/scraper/import-csv', { method: 'POST', body: formData })
       const data = await res.json()
@@ -337,24 +340,24 @@ export default function ScraperClient({
   // ─── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="p-8 max-w-full">
+    <div className="p-4 md:p-8 max-w-full">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-4 md:mb-6">
         <div>
-          <h1 style={{ color: '#0A1F44' }} className="text-3xl font-bold">County Records Scraper</h1>
-          <p className="text-gray-400 mt-1">Automated Florida lis pendens — replaces REIFax</p>
+          <h1 style={{ color: '#0A1F44' }} className="text-xl md:text-3xl font-bold">County Records Scraper</h1>
+          <p className="text-gray-400 mt-1 text-xs md:text-sm">Automated Florida lis pendens — replaces REIFax</p>
         </div>
         {/* REIFax deadline badge */}
         <div style={{ backgroundColor: daysUntilREIFax <= 14 ? '#E07B6A20' : '#C9A84C20', borderColor: daysUntilREIFax <= 14 ? '#E07B6A' : '#C9A84C' }}
-          className="border rounded-xl px-4 py-2 text-center">
-          <p className="text-xs font-semibold" style={{ color: daysUntilREIFax <= 14 ? '#E07B6A' : '#C9A84C' }}>REIFax Renewal</p>
-          <p className="text-2xl font-bold" style={{ color: daysUntilREIFax <= 14 ? '#E07B6A' : '#C9A84C' }}>{daysUntilREIFax}d</p>
-          <p className="text-xs text-gray-400">June 18, 2026</p>
+          className="border rounded-xl px-3 py-2 md:px-4 text-center">
+          <p className="text-xs font-semibold" style={{ color: daysUntilREIFax <= 14 ? '#E07B6A' : '#C9A84C' }}>REIFax</p>
+          <p className="text-xl md:text-2xl font-bold" style={{ color: daysUntilREIFax <= 14 ? '#E07B6A' : '#C9A84C' }}>{daysUntilREIFax}d</p>
+          <p className="text-xs text-gray-400 hidden sm:block">June 18, 2026</p>
         </div>
       </div>
 
       {/* Stats row */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-4 md:mb-6">
         {[
           { label: 'This Week',  value: stats.week },
           { label: 'This Month', value: stats.month },
@@ -368,9 +371,9 @@ export default function ScraperClient({
         ))}
       </div>
 
-      <div className="grid grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-5 md:gap-6">
         {/* Left — controls + tabs */}
-        <div className="col-span-2 space-y-5">
+        <div className="md:col-span-2 space-y-5">
           {/* Manual trigger */}
           <div className="bg-white rounded-2xl border border-gray-100 p-6">
             <h2 style={{ color: '#0A1F44' }} className="font-bold text-base mb-4">Manual Pull</h2>
@@ -407,39 +410,78 @@ export default function ScraperClient({
           <div className="bg-white rounded-2xl border border-gray-100 p-6">
             <h2 style={{ color: '#0A1F44' }} className="font-bold text-base mb-1">REIFax CSV Import</h2>
             <p className="text-gray-400 text-sm mb-4">
-              Upload a REIFax export to bulk import leads. Used for validation and migration.
+              Upload a REIFax export to bulk import leads.
             </p>
-            <div className="flex items-center gap-4">
-              <label
-                className="cursor-pointer font-bold px-5 py-2.5 rounded-xl text-sm transition-opacity hover:opacity-90"
-                style={{ backgroundColor: importing ? '#ccc' : '#4CAF9A', color: 'white' }}
-              >
-                {importing ? '⏳ Importing...' : '📂 Upload CSV'}
-                <input
-                  ref={fileRef}
-                  type="file"
-                  accept=".csv"
-                  className="hidden"
-                  onChange={handleCSVImport}
-                  disabled={importing}
-                />
-              </label>
-              <p className="text-xs text-gray-400">Accepts any REIFax CSV export format</p>
+            <div className="flex items-center gap-3 mb-4">
+              <div>
+                <p className="text-xs text-gray-400 mb-1">County (if not in CSV)</p>
+                <select
+                  value={importCounty}
+                  onChange={e => setImportCounty(e.target.value)}
+                  className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:border-[#C9A84C]"
+                >
+                  <option value="">Auto-detect</option>
+                  <option value="miami-dade">Miami-Dade</option>
+                  <option value="broward">Broward</option>
+                  <option value="palm-beach">Palm Beach</option>
+                </select>
+              </div>
+              <div className="pt-5">
+                <label
+                  className="cursor-pointer font-bold px-5 py-2 rounded-xl text-sm transition-opacity hover:opacity-90 inline-block"
+                  style={{ backgroundColor: importing ? '#ccc' : '#4CAF9A', color: 'white' }}
+                >
+                  {importing ? '⏳ Importing...' : '📂 Upload CSV'}
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept=".csv"
+                    className="hidden"
+                    onChange={handleCSVImport}
+                    disabled={importing}
+                  />
+                </label>
+              </div>
             </div>
-            {importError && <p className="text-red-500 text-sm mt-3">{importError}</p>}
+            {importError && <p className="text-red-500 text-sm mt-2">{importError}</p>}
             {importResult && (
-              <div className="mt-4 grid grid-cols-4 gap-3">
-                {[
-                  { label: 'Total Rows', value: importResult.total,   color: '#0A1F44', bg: '#F8F7F4' },
-                  { label: 'Created',   value: importResult.created,  color: '#4CAF9A', bg: '#4CAF9A10' },
-                  { label: 'Skipped',   value: importResult.skipped,  color: '#C9A84C', bg: '#C9A84C10' },
-                  { label: 'Errors',    value: importResult.errors,   color: '#E07B6A', bg: '#E07B6A10' },
-                ].map(s => (
-                  <div key={s.label} className="rounded-xl p-3 text-center" style={{ backgroundColor: s.bg }}>
-                    <p className="text-xs text-gray-400">{s.label}</p>
-                    <p className="text-xl font-bold" style={{ color: s.color }}>{s.value}</p>
+              <div className="mt-3 space-y-3">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {[
+                    { label: 'Total Rows', value: importResult.total,   color: '#0A1F44', bg: '#F8F7F4' },
+                    { label: 'Created',   value: importResult.created,  color: '#4CAF9A', bg: '#4CAF9A10' },
+                    { label: 'Skipped',   value: importResult.skipped,  color: '#C9A84C', bg: '#C9A84C10' },
+                    { label: 'Errors',    value: importResult.errors,   color: '#E07B6A', bg: '#E07B6A10' },
+                  ].map(s => (
+                    <div key={s.label} className="rounded-xl p-3 text-center" style={{ backgroundColor: s.bg }}>
+                      <p className="text-xs text-gray-400">{s.label}</p>
+                      <p className="text-xl font-bold" style={{ color: s.color }}>{s.value}</p>
+                    </div>
+                  ))}
+                </div>
+                {/* Debug info when things go wrong */}
+                {importResult.created === 0 && importResult.debug && (
+                  <div className="rounded-xl bg-orange-50 border border-orange-100 p-3 text-xs space-y-1">
+                    <p className="font-semibold text-orange-700">No leads were created — debug info:</p>
+                    {importResult.debug.detected_headers && (
+                      <p className="text-gray-600">
+                        <span className="font-medium">CSV headers:</span>{' '}
+                        {importResult.debug.detected_headers.slice(0, 12).join(', ')}
+                        {importResult.debug.detected_headers.length > 12 ? '…' : ''}
+                      </p>
+                    )}
+                    {importResult.debug.first_error && (
+                      <p className="text-red-600">
+                        <span className="font-medium">First error:</span> {importResult.debug.first_error.reason}
+                      </p>
+                    )}
+                    {importResult.debug.first_skip && (
+                      <p className="text-orange-600">
+                        <span className="font-medium">First skip:</span> {importResult.debug.first_skip.reason}
+                      </p>
+                    )}
                   </div>
-                ))}
+                )}
               </div>
             )}
           </div>
@@ -486,7 +528,7 @@ export default function ScraperClient({
             {propError && <p className="text-red-500 text-sm mt-3">{propError}</p>}
             {propResult && (
               <div className="mt-4">
-                <div className="grid grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   {[
                     { label: 'LP Records', value: propResult.total,   color: '#0A1F44', bg: '#F8F7F4' },
                     { label: 'Imported',   value: propResult.created, color: '#4CAF9A', bg: '#4CAF9A10' },
@@ -534,7 +576,7 @@ export default function ScraperClient({
             {bulkError && <p className="text-red-500 text-sm mt-3">{bulkError}</p>}
             {bulkResult && (
               <div className="mt-4">
-                <div className="grid grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   {[
                     { label: 'LP Records', value: bulkResult.total,      color: '#0A1F44', bg: '#F8F7F4' },
                     { label: 'Imported',   value: bulkResult.created,    color: '#4CAF9A', bg: '#4CAF9A10' },
@@ -574,7 +616,7 @@ export default function ScraperClient({
             {/* ── Run History ── */}
             {tab === 'runs' && (
               runs.length === 0 ? (
-                <div className="p-8 text-center">
+                <div className="p-6 text-center">
                   <p className="text-gray-400 text-sm">No runs yet. Trigger a manual pull above.</p>
                 </div>
               ) : (

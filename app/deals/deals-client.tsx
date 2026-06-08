@@ -41,22 +41,22 @@ export default function DealsClient({ deals }: { deals: Deal[] }) {
     .reduce((sum, d) => sum + (d.offer_price || 0), 0)
 
   return (
-    <div className="p-8">
+    <div className="p-4 md:p-8">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-4 md:mb-6">
         <div>
-          <h1 style={{ color: '#0A1F44' }} className="text-3xl font-bold">Deals</h1>
-          <p className="text-gray-400 mt-1">{deals.length} total · ${totalPipeline.toLocaleString()} active pipeline</p>
+          <h1 style={{ color: '#0A1F44' }} className="text-2xl md:text-3xl font-bold">Deals</h1>
+          <p className="text-gray-400 mt-1 text-xs md:text-sm">{deals.length} total · ${totalPipeline.toLocaleString()} active pipeline</p>
         </div>
         <a
           href="/deals/new"
           style={{ backgroundColor: '#0A1F44', color: '#C9A84C' }}
-          className="flex items-center gap-2 font-bold px-5 py-2.5 rounded-xl hover:opacity-90 transition-opacity text-sm"
+          className="flex items-center gap-2 font-bold px-4 py-2 md:px-5 md:py-2.5 rounded-xl hover:opacity-90 transition-opacity text-sm"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
           </svg>
-          New Deal
+          <span className="hidden sm:inline">New Deal</span>
         </a>
       </div>
 

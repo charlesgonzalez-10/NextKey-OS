@@ -21,38 +21,38 @@ export default function DashboardHome({ contactCount, dealCount }: Props) {
   ]
 
   return (
-    <div className="p-8 max-w-6xl">
+    <div className="p-4 md:p-8 max-w-6xl">
       {/* Header */}
-      <div className="mb-8">
-        <p className="text-gray-400 text-sm mb-1">{today}</p>
-        <h1 style={{ color: '#0A1F44' }} className="text-3xl font-bold">Good morning, Charles</h1>
-        <p className="text-gray-400 mt-1">Here's what's happening with NextKey today.</p>
+      <div className="mb-5 md:mb-8">
+        <p className="text-gray-400 text-xs md:text-sm mb-1">{today}</p>
+        <h1 style={{ color: '#0A1F44' }} className="text-2xl md:text-3xl font-bold">Good morning, Charles</h1>
+        <p className="text-gray-400 mt-1 text-sm">Here's what's happening with NextKey today.</p>
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-3 gap-6 mb-8">
+      <div className="grid grid-cols-3 gap-3 md:gap-6 mb-5 md:mb-8">
         {stats.map((s) => (
           <a
             key={s.label}
             href={s.href}
-            className="bg-white rounded-2xl p-6 border border-gray-100 hover:shadow-md transition-shadow block"
+            className="bg-white rounded-2xl p-4 md:p-6 border border-gray-100 hover:shadow-md transition-shadow block"
           >
-            <p className="text-gray-400 text-sm mb-2">{s.label}</p>
-            <p style={{ color: s.color }} className="text-4xl font-bold">{s.value}</p>
+            <p className="text-gray-400 text-xs md:text-sm mb-1 md:mb-2">{s.label}</p>
+            <p style={{ color: s.color }} className="text-3xl md:text-4xl font-bold">{s.value}</p>
           </a>
         ))}
       </div>
 
       {/* Quick actions */}
-      <div className="bg-white rounded-2xl p-6 border border-gray-100 mb-8">
-        <h2 style={{ color: '#0A1F44' }} className="font-bold text-lg mb-4">Quick Actions</h2>
-        <div className="flex gap-4">
+      <div className="bg-white rounded-2xl p-4 md:p-6 border border-gray-100 mb-5 md:mb-8">
+        <h2 style={{ color: '#0A1F44' }} className="font-bold text-base md:text-lg mb-3 md:mb-4">Quick Actions</h2>
+        <div className="flex gap-3 flex-wrap">
           {quickActions.map((a) => (
             <a
               key={a.label}
               href={a.href}
               style={{ backgroundColor: '#F8F7F4', borderColor: '#EDE9E0' }}
-              className="flex items-center gap-2 border rounded-xl px-5 py-3 text-sm font-semibold hover:shadow-sm transition-shadow"
+              className="flex items-center gap-2 border rounded-xl px-4 py-2.5 text-sm font-semibold hover:shadow-sm transition-shadow"
             >
               <span>{a.icon}</span>
               <span style={{ color: '#0A1F44' }}>{a.label}</span>

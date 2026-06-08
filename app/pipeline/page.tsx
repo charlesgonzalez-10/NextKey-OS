@@ -16,7 +16,7 @@ export default async function PipelinePage() {
 
   return (
     <DashboardLayout>
-      <PipelineClient deals={deals ?? []} />
+      <PipelineClient deals={(deals ?? []).filter(Boolean)} />
     </DashboardLayout>
   )
 }

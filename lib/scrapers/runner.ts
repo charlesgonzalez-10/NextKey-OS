@@ -217,11 +217,15 @@ async function runCountyScraper(
       const ownerName = lead.owner_name || lead.mortgagor || ''
       lead.entity_type = detectEntityType(ownerName)
 
-      // Insert into scraper_leads
-      const { error: insertErr } = await supabase.from('scraper_leads').insert([{
+      // Insert into properties (unified property database)
+      const countySourceLabel =
+        county === 'miami-dade' ? 'Miami-Dade Clerk' :
+        county === 'broward'    ? 'Broward Clerk'    : 'Palm Beach Clerk'
+      const { data: newProperty, error: insertErr } = await supabase.from('properties').insert([{
         scraper_run_id:     runId,
-        status:             'pending',
+        source:             'scraper',
         county:             county,
+        data_source:        countySourceLabel,
         case_number:        lead.case_number,
         file_date:          lead.file_date,
         plaintiff:          lead.plaintiff,
@@ -233,6 +237,8 @@ async function runCountyScraper(
         auction_date:       lead.auction_date || null,
         auction_amount:     lead.auction_amount || null,
         multiple_liens:     lead.multiple_liens,
+        is_pre_foreclosure: lead.foreclosure_type === 'P',
+        is_auction:         lead.foreclosure_type === 'A',
         folio_number:       lead.folio_number || null,
         owner_name:         lead.owner_name || null,
         property_address:   lead.property_address || null,
@@ -267,19 +273,26 @@ async function runCountyScraper(
         equity_dollar_amount: lead.equity_dollar_amount || null,
         equity_tier:        lead.equity_tier || null,
         entity_type:        lead.entity_type,
-      }])
+      }]).select('id').single()
 
-      if (insertErr) {
+      if (insertErr || !newProperty) {
         result.errors++
         result.error_log.push({
           case_number: record.case_number,
-          reason: insertErr.message,
+          reason: insertErr?.message || 'Insert returned no data',
         })
         continue
       }
 
-      // Auto-import to contacts table
-      await importLeadToContact(supabase, lead, county)
+      // Create a lead record (this property is now in the leads pipeline)
+      await supabase.from('leads').insert([{
+        property_id: newProperty.id,
+        status:      'new',
+        source:      'scraper',
+      }]).then(({ error }) => {
+        if (error) console.warn(`[scraper] leads insert failed for ${newProperty.id}:`, error.message)
+      })
+
       result.new_leads++
 
     } catch (err) {
@@ -294,57 +307,7 @@ async function runCountyScraper(
   return result
 }
 
-// ─── Auto-import lead → contacts ─────────────────────────────────────────────
-
-async function importLeadToContact(
-  supabase: ReturnType<typeof getSupabase>,
-  lead: EnrichedLead,
-  county: County
-) {
-  const countyName = county === 'miami-dade' ? 'Miami-Dade'
-    : county === 'broward' ? 'Broward'
-    : 'Palm Beach'
-
-  const ownerName = lead.owner_name || lead.mortgagor || 'Unknown Owner'
-  const tags = ['pre-foreclosure', county]
-  if (lead.homestead) tags.push('owner-occupied')
-  if (lead.vacant) tags.push('vacant')
-  if (lead.multiple_liens) tags.push('multiple-liens')
-  if (lead.equity_tier) tags.push(`equity-${lead.equity_tier.toLowerCase()}`)
-  if (lead.entity_type && lead.entity_type !== 'Individual') {
-    tags.push(lead.entity_type.toLowerCase().replace(' ', '-'))
-  }
-
-  const notesLines = [
-    `Pre-Foreclosure — ${countyName} County`,
-    `Case: ${lead.case_number}`,
-    lead.folio_number ? `Folio: ${lead.folio_number}` : '',
-    lead.file_date ? `Filed: ${lead.file_date}` : '',
-    lead.plaintiff ? `Plaintiff: ${lead.plaintiff}` : '',
-    lead.foreclosure_amount ? `Foreclosure Amount: $${lead.foreclosure_amount.toLocaleString()}` : '',
-    lead.equity_tier ? `Equity Tier: ${lead.equity_tier} (${lead.equity_percentage}% / $${lead.equity_dollar_amount?.toLocaleString()})` : '',
-    lead.assessed_value ? `Assessed Value: $${lead.assessed_value.toLocaleString()}` : '',
-    lead.beds ? `Beds/Baths: ${lead.beds}/${lead.baths}` : '',
-    lead.year_built ? `Year Built: ${lead.year_built}` : '',
-    lead.subdivision_name ? `Subdivision: ${lead.subdivision_name}` : '',
-  ].filter(Boolean).join('\n')
-
-  const { data: contact } = await supabase.from('contacts').insert([{
-    name: ownerName,
-    phone: lead.phone_1 || '',
-    address: lead.property_address || '',
-    category: 'Seller',
-    status: 'Active',
-    source: `County Records — ${countyName}`,
-    tags,
-    notes: notesLines,
-  }]).select('id').single()
-
-  // Link back to scraper_leads
-  if (contact) {
-    await supabase
-      .from('scraper_leads')
-      .update({ status: 'imported', imported_to_contact: contact.id })
-      .eq('case_number', lead.case_number)
-  }
-}
+// NOTE: Auto-import to contacts removed in the unified property architecture.
+// Properties flow: Scraper → properties table + leads table
+// When Charles wants to work a lead, he clicks "Add to Pipeline" from the
+// Leads page, which creates a Contact linked to the property.

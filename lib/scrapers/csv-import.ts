@@ -28,9 +28,12 @@ const COLUMN_MAP: Record<string, string> = {
   'owner name': 'owner_name',
   'owner': 'owner_name',
   'property owner': 'owner_name',
+  'name': 'owner_name',
+  'grantor': 'owner_name',
   'mortgagor': 'mortgagor',
   'borrower': 'mortgagor',
   'defendant': 'mortgagor',
+  'defendant name': 'mortgagor',
   // Case
   'case number': 'case_number',
   'case #': 'case_number',
@@ -40,11 +43,20 @@ const COLUMN_MAP: Record<string, string> = {
   'filing date': 'file_date',
   'date filed': 'file_date',
   'recording date': 'file_date',
+  'entry date': 'file_date',
+  'entered date': 'file_date',
+  'recorded date': 'file_date',
+  'instrument date': 'file_date',
+  'doc date': 'file_date',
+  'document date': 'file_date',
+  'filed date': 'file_date',
   // Plaintiff / Lender
   'plaintiff': 'plaintiff',
+  'plaintiff name': 'plaintiff',
   'lender': 'lender_name',
   'lender name': 'lender_name',
   'foreclosing lender': 'lender_name',
+  'bank name': 'lender_name',
   // Foreclosure amount
   'foreclosure amount': 'foreclosure_amount',
   'mortgage amount': 'foreclosure_amount',
@@ -165,6 +177,31 @@ export interface CSVImportResult {
   leads: EnrichedLead[]
 }
 
+/**
+ * Find the actual header row index.
+ * REIFax (and some other exports) put a title row first, e.g.:
+ *   Row 0: "Results,,,,,,,"   ← title row, mostly empty
+ *   Row 1: "Address,City,..."  ← real headers
+ * We scan the first 10 lines looking for the row that has the most
+ * recognisable column keywords.
+ */
+function findHeaderRowIndex(csvText: string): number {
+  const keywords = [
+    'address', 'city', 'county', 'case', 'plaintiff', 'defendant',
+    'owner', 'zip', 'date', 'name', 'folio', 'amount', 'mortgagor',
+    'state', 'lender', 'entry', 'record',
+  ]
+  const lines = csvText.split('\n').slice(0, 10)
+  let bestRow = 0
+  let bestScore = 0
+  for (let i = 0; i < lines.length; i++) {
+    const lower = lines[i].toLowerCase()
+    const score = keywords.filter(k => lower.includes(k)).length
+    if (score > bestScore) { bestScore = score; bestRow = i }
+  }
+  return bestRow
+}
+
 export function parseREIFaxCSV(csvText: string): CSVImportResult {
   const result: CSVImportResult = {
     total: 0,
@@ -176,7 +213,13 @@ export function parseREIFaxCSV(csvText: string): CSVImportResult {
     leads: [],
   }
 
-  const parsed = Papa.parse<Record<string, string>>(csvText, {
+  // Skip any leading title/summary rows
+  const headerRowIdx = findHeaderRowIndex(csvText)
+  const csvToParse = headerRowIdx > 0
+    ? csvText.split('\n').slice(headerRowIdx).join('\n')
+    : csvText
+
+  const parsed = Papa.parse<Record<string, string>>(csvToParse, {
     header: true,
     skipEmptyLines: true,
     transformHeader: (h) => h.trim(),

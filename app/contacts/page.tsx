@@ -15,7 +15,7 @@ export default async function ContactsPage() {
 
   return (
     <DashboardLayout>
-      <ContactsClient contacts={contacts ?? []} />
+      <ContactsClient contacts={(contacts ?? []).filter(Boolean)} />
     </DashboardLayout>
   )
 }

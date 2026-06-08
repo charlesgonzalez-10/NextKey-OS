@@ -9,11 +9,40 @@
   --color-sidebar: #0D2347;
 }
 
+/* ── OS-adaptive theme variables ──────────────────────────────────────────── */
+:root {
+  --c-primary:   #0A1F44;
+  --c-gold:      #C9A84C;
+  --c-bg:        #F0F2F5;
+  --c-card:      #ffffff;
+  --c-card-alt:  #F8F7F4;
+  --c-border:    #f3f4f6;
+  --c-text-2:    #6b7280;
+  --c-text-3:    #9ca3af;
+  --c-hover:     #f9fafb;
+  --c-input-bg:  #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --c-primary:   #ffffff;
+    --c-gold:      #C9A84C;
+    --c-bg:        #060F1E;
+    --c-card:      #081530;
+    --c-card-alt:  #0d1e3a;
+    --c-border:    rgba(255,255,255,0.08);
+    --c-text-2:    rgba(255,255,255,0.45);
+    --c-text-3:    rgba(255,255,255,0.28);
+    --c-hover:     rgba(255,255,255,0.04);
+    --c-input-bg:  rgba(255,255,255,0.05);
+  }
+}
+
 html { height: 100%; }
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background: #F0F2F5;
-  color: #1a1a1a;
+  background: var(--c-bg);
+  color: var(--c-primary);
   height: 100%;
 }
