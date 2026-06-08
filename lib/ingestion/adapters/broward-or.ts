@@ -35,7 +35,7 @@
  */
 
 import SftpClient from 'ssh2-sftp-client'
-import { isLisPendens } from './types'
+import { isDistressType, classifyDocType } from './types'
 import type { CountyAdapter, ORRecord, AdapterResult } from './types'
 
 // ─── SFTP credentials (public, published by Broward County) ──────────────────
@@ -106,7 +106,7 @@ function parseLine(line: string, sourceFile: string): ORRecord | null {
   const cols = trimmed.split(delimiter)
 
   const docType = (cols[BROWARD_COLS.doc_type] ?? '').trim()
-  if (!isLisPendens(docType)) return null
+  if (!isDistressType(docType)) return null
 
   const cfn       = (cols[BROWARD_COLS.cfn]       ?? '').trim()
   const grantor   = (cols[BROWARD_COLS.grantor]    ?? '').trim()
@@ -121,6 +121,7 @@ function parseLine(line: string, sourceFile: string): ORRecord | null {
     case_number:       cfn,
     recording_date:    parseBrowardDate(cols[BROWARD_COLS.recorded_date] ?? ''),
     doc_type:          docType,
+    lead_category:     classifyDocType(docType),
     plaintiff:         grantor,
     defendant:         grantee,
     legal_description: legalDesc || undefined,
@@ -202,7 +203,7 @@ export class BrowardORAdapter implements CountyAdapter {
       if (record) records.push(record)
     }
 
-    console.log(`[Broward OR] ${fileName}: ${fetched} rows total, ${records.length} LP filings`)
+    console.log(`[Broward OR] ${fileName}: ${fetched} rows total, ${records.length} distress filings`)
 
     return {
       county:   'broward',

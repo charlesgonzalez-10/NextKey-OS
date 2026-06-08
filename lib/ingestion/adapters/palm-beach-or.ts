@@ -22,7 +22,7 @@
 
 import * as cheerio from 'cheerio'
 import type { Element as DomElement } from 'domhandler'
-import { isLisPendens } from './types'
+import { isDistressType, classifyDocType } from './types'
 import type { CountyAdapter, ORRecord, AdapterResult } from './types'
 
 // ─── Endpoints ───────────────────────────────────────────────────────────────
@@ -128,12 +128,11 @@ function cell($: cheerio.CheerioAPI, row: cheerio.Cheerio<DomElement>, col: numb
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function tryJSONEndpoint(yesterday: string): Promise<Record<string, any>[] | null> {
   try {
+    // No DocType filter — fetch all types recorded yesterday, classify client-side.
     const params = new URLSearchParams({
-      DocTypeLow:          'LP',
-      DocTypeHigh:         'LP',
       BeginRecordedDate:   yesterday,  // MM/DD/YYYY
       EndRecordedDate:     yesterday,
-      SearchType:          'DocumentType',
+      SearchType:          'DateRange',
     })
 
     const res = await fetch(`${SEARCH_POST}?${params}`, {
@@ -180,7 +179,7 @@ export class PalmBeachORAdapter implements CountyAdapter {
       const records: ORRecord[] = []
       for (const row of jsonRows) {
         const docType  = String(row.DocType ?? row.doc_type ?? row.documentType ?? '').trim()
-        if (!isLisPendens(docType)) continue
+        if (!isDistressType(docType)) continue
 
         const caseNum = String(row.CFN ?? row.cfn ?? row.InstrumentNumber ?? row.instrument_number ?? '').trim()
         if (!caseNum) continue
@@ -190,6 +189,7 @@ export class PalmBeachORAdapter implements CountyAdapter {
           case_number:       caseNum,
           recording_date:    parseDateToISO(String(row.RecordedDate ?? row.recorded_date ?? row.date ?? '')),
           doc_type:          docType,
+          lead_category:     classifyDocType(docType),
           plaintiff:         String(row.Grantor ?? row.grantor ?? row.GrantorName ?? '').trim(),
           defendant:         String(row.Grantee ?? row.grantee ?? row.GranteeName ?? '').trim(),
           legal_description: String(row.LegalDesc ?? row.legal_description ?? row.LegalDescription ?? '').trim() || undefined,
@@ -199,7 +199,7 @@ export class PalmBeachORAdapter implements CountyAdapter {
           raw:               row,
         })
       }
-      console.log(`[Palm Beach OR] JSON endpoint: ${jsonRows.length} rows, ${records.length} LP filings`)
+      console.log(`[Palm Beach OR] JSON endpoint: ${jsonRows.length} rows, ${records.length} distress filings`)
       return { county: 'palm-beach', records, fetched: jsonRows.length, filtered: records.length, source: source + ':json' }
     }
 
@@ -232,10 +232,8 @@ export class PalmBeachORAdapter implements CountyAdapter {
       return { county: 'palm-beach', records: [], fetched: 0, filtered: 0, source, error: msg }
     }
 
-    // Step 2: POST the search form
+    // Step 2: POST the search form — no DocType restriction, fetch all types
     const formBody = new URLSearchParams({
-      DocTypeLow:                   'LP',
-      DocTypeHigh:                  'LP',
       BeginRecordedDate:            yesterday,
       EndRecordedDate:              yesterday,
       SearchType:                   'DocumentType',
@@ -301,7 +299,7 @@ export class PalmBeachORAdapter implements CountyAdapter {
       fetched++
 
       const docType = cell($, row, colMap.doc_type)
-      if (!isLisPendens(docType)) return
+      if (!isDistressType(docType)) return
 
       const caseNum = cell($, row, colMap.cfn)
       if (!caseNum) return
@@ -313,6 +311,7 @@ export class PalmBeachORAdapter implements CountyAdapter {
         case_number:       caseNum,
         recording_date:    parseDateToISO(cell($, row, colMap.recorded_date)),
         doc_type:          docType,
+        lead_category:     classifyDocType(docType),
         plaintiff:         cell($, row, colMap.grantor),
         defendant:         cell($, row, colMap.grantee),
         legal_description: cell($, row, colMap.legal_desc) || undefined,
@@ -323,7 +322,7 @@ export class PalmBeachORAdapter implements CountyAdapter {
       })
     })
 
-    console.log(`[Palm Beach OR] HTML: ${fetched} rows total, ${records.length} LP filings`)
+    console.log(`[Palm Beach OR] HTML: ${fetched} rows total, ${records.length} distress filings`)
     return { county: 'palm-beach', records, fetched, filtered: records.length, source: source + ':html' }
   }
 }

@@ -11,14 +11,28 @@ import type { County } from '@/lib/scrapers/types'
 
 // ─── Normalised OR record ─────────────────────────────────────────────────────
 
+// ─── Lead category ────────────────────────────────────────────────────────────
+
 /**
- * One Lis Pendens filing extracted from a county OR index feed.
+ * Normalised category derived from the raw OR doc_type code.
+ * This is the single field that drives which tab/flag a record lands in.
+ */
+export type LeadCategory =
+  | 'lis_pendens'   // LP → Pre-Foreclosure
+  | 'probate'       // PROB → Probate
+  | 'tax_deed'      // TCD/TL → Tax Deed / Tax Lien
+  | 'divorce'       // DOM → Divorce / Dissolution of Marriage
+  | 'unknown'
+
+/**
+ * One OR filing extracted from a county index feed.
  *
  * Field notes:
- *  - `case_number`  : court docket / OR instrument CFN — the dedup key
- *  - `plaintiff`    : OR "grantor" — the lender / party filing the action
- *  - `defendant`    : OR "grantee" — the borrower / property owner
- *  - `consideration`: lien / claim amount from the OR index (if present)
+ *  - `case_number`    : court docket / OR instrument CFN — the dedup key
+ *  - `lead_category`  : derived category; drives DB flags & tab routing
+ *  - `plaintiff`      : OR "grantor" — the lender / party filing the action
+ *  - `defendant`      : OR "grantee" — the borrower / property owner
+ *  - `consideration`  : lien / claim amount from the OR index (if present)
  *  - `property_address` / `legal_description`: optional; the resolver uses
  *    whichever is available to match a folio. Both may be absent from some feeds.
  */
@@ -28,18 +42,19 @@ export interface ORRecord {
 
   // Filing metadata
   recording_date:     string          // YYYY-MM-DD
-  doc_type:           string          // raw code from feed: LP, LIS, LIS PENDENS …
+  doc_type:           string          // raw code from feed: LP, PROB, DOM, TCD …
+  lead_category:      LeadCategory    // normalised category
 
   // Parties
-  plaintiff:          string          // grantor = lender
-  defendant:          string          // grantee = borrower / current owner
+  plaintiff:          string          // grantor = lender / petitioner
+  defendant:          string          // grantee = borrower / respondent
 
   // Property hints — populated when available, absent otherwise
   property_address?:  string
   legal_description?: string
 
   // Financial
-  consideration?:     number          // lien amount in $
+  consideration?:     number          // lien / estate amount in $
 
   // Provenance
   county:             County
@@ -64,27 +79,74 @@ export interface CountyAdapter {
   fetchYesterdaysRecords(): Promise<ORRecord[]>
 }
 
-// ─── LP doc type guard ────────────────────────────────────────────────────────
+// ─── Doc type classification ──────────────────────────────────────────────────
 
-/**
- * Normalised set of OR document type codes that represent a Lis Pendens filing
- * across all three county feeds. Broward and Palm Beach use short codes; the
- * Miami-Dade API uses "LP" exclusively.
- */
+/** Lis Pendens — Pre-Foreclosure */
 export const LIS_PENDENS_DOC_TYPES = new Set([
-  'LP',
-  'LIS',
-  'LISAM',    // LP amendment
-  'LPAM',     // LP amendment (Broward variant)
-  'LISPENDENS',
-  'LIS PENDENS',
-  'LIS-PENDENS',
-  'LISP',
-  'LPE',      // LP extension
+  'LP', 'LIS', 'LISAM', 'LPAM', 'LISPENDENS',
+  'LIS PENDENS', 'LIS-PENDENS', 'LISP', 'LPE',
+  'NLIS',           // Notice of Lis Pendens
 ])
 
+/** Probate — estate filings, letters of administration, notice to creditors */
+export const PROBATE_DOC_TYPES = new Set([
+  'PROB', 'PROBATE', 'PR',
+  'NOA',            // Notice of Administration
+  'NTC',            // Notice to Creditors (Broward probate variant)
+  'PRBD',           // Probate Bond
+  'PROBL',          // Probate Lien
+  'LTOR',           // Letters of Administration / Testamentary
+  'LTRS',           // Letters (generic)
+])
+
+/** Tax Deed / Tax Certificate — county tax deed sales */
+export const TAX_DEED_DOC_TYPES = new Set([
+  'TCD', 'TAXDEED', 'TAX DEED', 'TAX-DEED',
+  'TCF', 'TCT',     // Tax Certificate
+  'TL',             // Tax Lien
+  'TAX LIEN', 'TAXLIEN',
+  'TDOA',           // Tax Deed Overbid Application
+])
+
+/** Dissolution of Marriage — divorce with real property involvement */
+export const DIVORCE_DOC_TYPES = new Set([
+  'DOM', 'DOMP', 'DOMN', 'DISS',
+  'DISSOLUTION', 'DISSOLUTION OF MARRIAGE',
+  'DOM-RE',         // DOM with Real Estate
+])
+
+/** Master set — every doc type we want to ingest */
+export const ALL_DISTRESS_DOC_TYPES = new Set([
+  ...LIS_PENDENS_DOC_TYPES,
+  ...PROBATE_DOC_TYPES,
+  ...TAX_DEED_DOC_TYPES,
+  ...DIVORCE_DOC_TYPES,
+])
+
+/** Normalise a raw doc type string before set lookup */
+function norm(docType: string): string {
+  return docType.trim().toUpperCase().replace(/\s+/g, ' ')
+}
+
 export function isLisPendens(docType: string): boolean {
-  return LIS_PENDENS_DOC_TYPES.has(docType.trim().toUpperCase().replace(/\s+/g, ' '))
+  return LIS_PENDENS_DOC_TYPES.has(norm(docType))
+}
+
+export function isDistressType(docType: string): boolean {
+  return ALL_DISTRESS_DOC_TYPES.has(norm(docType))
+}
+
+/**
+ * Classify a raw OR doc type code into a LeadCategory.
+ * Returns 'unknown' if the code is not in any known set.
+ */
+export function classifyDocType(docType: string): LeadCategory {
+  const n = norm(docType)
+  if (LIS_PENDENS_DOC_TYPES.has(n)) return 'lis_pendens'
+  if (PROBATE_DOC_TYPES.has(n))     return 'probate'
+  if (TAX_DEED_DOC_TYPES.has(n))    return 'tax_deed'
+  if (DIVORCE_DOC_TYPES.has(n))     return 'divorce'
+  return 'unknown'
 }
 
 // ─── Adapter result envelope ──────────────────────────────────────────────────

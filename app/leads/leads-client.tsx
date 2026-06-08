@@ -55,11 +55,58 @@ const STAGE_COLORS: Record<string, string> = {
   offer:     '#4CAF9A',
   dead:      '#9ca3af',
 }
-const DISTRESS_COLORS: Record<string, string> = {
-  'Lis Pendens':  '#f59e0b',
-  'Foreclosure':  '#ef4444',
-  'Probate':      '#a78bfa',
-  'Tax Deed':     '#f97316',
+// ─── Record type tabs ─────────────────────────────────────────────────────────
+type RecordType = 'all' | 'lp' | 'probate' | 'auction' | 'tax_deed' | 'divorce'
+const RECORD_TABS: { value: RecordType; label: string; color: string }[] = [
+  { value: 'all',      label: 'All',            color: '#7B8FD4' },
+  { value: 'lp',       label: 'Pre-Foreclosure', color: '#f59e0b' },
+  { value: 'probate',  label: 'Probate',         color: '#a78bfa' },
+  { value: 'auction',  label: 'Auction',         color: '#ef4444' },
+  { value: 'tax_deed', label: 'Tax Deed',        color: '#f97316' },
+  { value: 'divorce',  label: 'Divorce',         color: '#6ABDE0' },
+]
+
+// ─── Source badge config ──────────────────────────────────────────────────────
+const SOURCE_BADGE: Record<string, { label: string; color: string }> = {
+  'Broward OR Index':   { label: 'BRW-OR',    color: '#4CAF9A' },
+  'MD OR Index':        { label: 'MD-OR',     color: '#7B8FD4' },
+  'PBC OR Index':       { label: 'PBC-OR',    color: '#C9A84C' },
+  'REIFax':             { label: 'REIFax',    color: '#E07B6A' },
+  'PropStream':         { label: 'PropStream',color: '#6ABDE0' },
+  'Palm Beach Bulk':    { label: 'PB-Bulk',   color: '#C9A84C' },
+  'CSV Import':         { label: 'CSV',       color: '#9ca3af' },
+  'Manual':             { label: 'Manual',    color: '#9ca3af' },
+}
+function getSourceBadge(lead: Lead) {
+  const src = (lead.data_source || lead.source || '') as string
+  for (const [key, cfg] of Object.entries(SOURCE_BADGE)) {
+    if (src.toLowerCase().includes(key.toLowerCase())) return cfg
+  }
+  if (src) return { label: src.slice(0, 8), color: '#9ca3af' }
+  return null
+}
+
+// ─── County PA link builder ───────────────────────────────────────────────────
+function getPALink(lead: Lead): string | null {
+  const folio   = lead.folio_number as string | null
+  const county  = lead.county as string
+  const address = lead.property_address as string | null
+  if (county === 'miami-dade' && folio) {
+    return `https://www.miamidade.gov/Apps/PA/propertysearch/#/?folio=${encodeURIComponent(folio)}`
+  }
+  if (county === 'broward' && folio) {
+    return `https://www.bcpa.net/RecInfo.asp?URL_Folio=${encodeURIComponent(folio)}`
+  }
+  if (county === 'palm-beach' && folio) {
+    return `https://www.pbcpao.gov/property-details/${encodeURIComponent(folio)}`
+  }
+  // Fallback: address search on county PA
+  if (address) {
+    if (county === 'miami-dade') return `https://www.miamidade.gov/Apps/PA/propertysearch/#/?address=${encodeURIComponent(address)}`
+    if (county === 'broward')    return `https://www.bcpa.net/RecInfo.asp?URL_Parcel=&URL_Address=${encodeURIComponent(address)}`
+    if (county === 'palm-beach') return `https://www.pbcpao.gov/search?search=${encodeURIComponent(address)}`
+  }
+  return null
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -87,6 +134,9 @@ function fmt$(v: number | null | undefined) {
 function getLeadTypeTags(lead: Lead): { label: string; color: string }[] {
   const tags: { label: string; color: string }[] = []
   if (lead.is_pre_foreclosure) tags.push({ label: 'Pre-FC',      color: '#f59e0b' })
+  if (lead.is_probate)         tags.push({ label: 'Probate',     color: '#a78bfa' })
+  if (lead.is_tax_deed)        tags.push({ label: 'Tax Deed',    color: '#f97316' })
+  if (lead.is_divorce)         tags.push({ label: 'Divorce',     color: '#6ABDE0' })
   if (lead.is_auction)         tags.push({ label: 'Auction',     color: '#ef4444' })
   if (lead.multiple_liens)     tags.push({ label: 'Multi-Lien',  color: '#E07B6A' })
   if (lead.free_clear)         tags.push({ label: 'Free&Clear',  color: '#4CAF9A' })
@@ -95,7 +145,7 @@ function getLeadTypeTags(lead: Lead): { label: string; color: string }[] {
   const et = (lead.entity_type as string || '').toLowerCase()
   if (/llc|corp|inc|lp\b/.test(et)) tags.push({ label: 'LLC/Corp', color: '#a78bfa' })
   else if (/trust|estate/.test(et)) tags.push({ label: 'Trust',    color: '#a78bfa' })
-  return tags.slice(0, 3) // cap at 3 tags to keep row compact
+  return tags.slice(0, 3)
 }
 
 // ─── Property Row ─────────────────────────────────────────────────────────────
@@ -115,6 +165,8 @@ function PropertyRow({ lead, selected, onSelect, onStar, onClick }: {
   const eClr    = EQUITY_COLORS[lead.equity_tier as string] ?? '#9ca3af'
   const sClr    = STAGE_COLORS[lead.pipeline_stage as string] ?? '#9ca3af'
   const ltTags  = getLeadTypeTags(lead)
+  const srcBadge = getSourceBadge(lead)
+  const paLink   = getPALink(lead)
 
   const toggleStar = async (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -153,17 +205,36 @@ function PropertyRow({ lead, selected, onSelect, onStar, onClick }: {
         </svg>
       </td>
 
-      {/* Address + county */}
+      {/* Address + source badge + PA link */}
       <td className="py-3 pr-4 min-w-[180px]">
         <div className="flex items-center gap-2">
           <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: cClr }} />
-          <div className="min-w-0">
-            <p className="text-xs font-semibold truncate" style={{ color: 'var(--c-primary)' }}>
-              {lead.property_address || '—'}
-            </p>
-            <p className="text-[10px] truncate" style={{ color: 'var(--c-text-3)' }}>
-              {lead.city}{lead.zip ? ` ${lead.zip}` : ''}
-            </p>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <p className="text-xs font-semibold truncate" style={{ color: 'var(--c-primary)' }}>
+                {lead.property_address || '—'}
+              </p>
+              {paLink && (
+                <a href={paLink} target="_blank" rel="noopener noreferrer"
+                  onClick={e => e.stopPropagation()}
+                  title="Open in County Property Appraiser"
+                  className="shrink-0 text-[9px] font-bold px-1 py-0.5 rounded hover:opacity-70"
+                  style={{ backgroundColor: 'rgba(201,168,76,0.15)', color: '#C9A84C' }}>
+                  PA↗
+                </a>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <p className="text-[10px] truncate" style={{ color: 'var(--c-text-3)' }}>
+                {lead.city}{lead.zip ? ` ${lead.zip}` : ''}
+              </p>
+              {srcBadge && (
+                <span className="text-[8px] font-bold px-1 py-0.5 rounded shrink-0 whitespace-nowrap"
+                  style={{ backgroundColor: `${srcBadge.color}18`, color: srcBadge.color }}>
+                  {srcBadge.label}
+                </span>
+              )}
+            </div>
           </div>
         </div>
       </td>
@@ -647,20 +718,25 @@ export default function PropertySearchClient({
   // Selection
   const [selected, setSelected] = useState<Set<string>>(new Set())
 
+  // Record type tab
+  const [recordType, setRecordType] = useState<RecordType>('all')
+
   // Sort
   const [sortBy, setSortBy]   = useState<'file_date' | 'equity_percentage' | 'market_value' | 'lead_score'>('file_date')
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc')
 
   // ── Fetch ─────────────────────────────────────────────────────────────────
 
-  const fetchLeads = useCallback(async (c: CriteriaState, p = 1) => {
+  const fetchLeads = useCallback(async (c: CriteriaState, p = 1, rt: RecordType = recordType) => {
     setLoading(true)
-    const params = criteriaToParams(c, {
-      page:      String(p),
-      limit:     '200',
-      sort_by:   sortBy,
-      sort_dir:  sortDir,
-    })
+    const extra: Record<string, string> = {
+      page:     String(p),
+      limit:    '200',
+      sort_by:  sortBy,
+      sort_dir: sortDir,
+    }
+    if (rt !== 'all') extra.record_type = rt
+    const params = criteriaToParams(c, extra)
     try {
       const res  = await fetch(`/api/properties?${params}`)
       const data = await res.json()
@@ -683,8 +759,13 @@ export default function PropertySearchClient({
       .catch(() => {})
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Re-run when sort changes
-  useEffect(() => { fetchLeads(criteria, 1) }, [sortBy, sortDir]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Re-run when sort or record type changes
+  useEffect(() => { fetchLeads(criteria, 1, recordType) }, [sortBy, sortDir, recordType]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const switchTab = (rt: RecordType) => {
+    setRecordType(rt)
+    fetchLeads(criteria, 1, rt)
+  }
 
   // ── Property lookup (fires when search looks like a street address) ──────
 
@@ -854,9 +935,10 @@ export default function PropertySearchClient({
             value={searchInput}
             onChange={e => handleSearchChange(e.target.value)}
             onKeyDown={e => {
-              if (e.key === 'Enter') {
+              if (e.key === 'Escape') {
+                setSearchInput(''); handleSearchChange(''); setLookupResult(null)
+              } else if (e.key === 'Enter') {
                 if (looksLikeAddress(searchInput)) {
-                  // Address → go straight to property detail page
                   router.push(`/leads/property?q=${encodeURIComponent(searchInput)}`)
                 } else {
                   commitSearch()
@@ -887,6 +969,24 @@ export default function PropertySearchClient({
             style={{ backgroundColor: 'var(--c-primary)', color: '#C9A84C' }}>
             Search
           </button>
+        </div>
+        {/* Record type tabs */}
+        <div className="flex items-center gap-1 mt-3 flex-wrap">
+          {RECORD_TABS.map(tab => {
+            const active = recordType === tab.value
+            return (
+              <button key={tab.value} onClick={() => switchTab(tab.value)}
+                className="text-[11px] font-bold px-3 py-1.5 rounded-full transition-all whitespace-nowrap"
+                style={{
+                  backgroundColor: active ? tab.color : 'var(--c-hover)',
+                  color:           active ? '#fff'      : 'var(--c-text-2)',
+                  border:          `1px solid ${active ? tab.color : 'var(--c-border)'}`,
+                  opacity:         tab.value === 'tax_deed' || tab.value === 'divorce' ? (active ? 1 : 0.6) : 1,
+                }}>
+                {tab.label}
+              </button>
+            )
+          })}
         </div>
       </div>{/* end header card */}
 

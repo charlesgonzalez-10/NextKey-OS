@@ -31,7 +31,7 @@
  *       credentials, only update FIELD_MAP below — nothing else needs to change.
  */
 
-import { isLisPendens } from './types'
+import { isDistressType, classifyDocType } from './types'
 import type { CountyAdapter, ORRecord, AdapterResult } from './types'
 
 // ─── API base ─────────────────────────────────────────────────────────────────
@@ -111,13 +111,14 @@ function normalizeRecord(raw: Record<string, any>, source: string): ORRecord | n
   const caseNum  = pick(raw, FIELD_MAP.case_number)
   const docType  = pick(raw, FIELD_MAP.doc_type)
 
-  if (!caseNum)               return null   // no identifier — skip
-  if (!isLisPendens(docType)) return null   // not a LP — shouldn't happen since we filter in the query, but belt+suspenders
+  if (!caseNum)                return null   // no identifier — skip
+  if (!isDistressType(docType)) return null  // not a tracked distress type
 
   return {
     case_number:       caseNum,
     recording_date:    normalizeDate(pick(raw, FIELD_MAP.recording_date)),
     doc_type:          docType,
+    lead_category:     classifyDocType(docType),
     plaintiff:         pick(raw, FIELD_MAP.grantor),
     defendant:         pick(raw, FIELD_MAP.grantee),
     legal_description: pick(raw, FIELD_MAP.legal_description) || undefined,
@@ -168,7 +169,8 @@ export class MiamiDadeORAdapter implements CountyAdapter {
     const url = new URL(`${API_BASE}/SearchByDate`)
     url.searchParams.set('begin_date',  yesterday)
     url.searchParams.set('end_date',    yesterday)
-    url.searchParams.set('doc_type',    'LP')
+    // No doc_type filter — pull all types and classify client-side.
+    // This way a single API call gets LP + PROB + TCD + DOM in one shot.
     url.searchParams.set('api_key',     key)        // some plans pass key as query param
 
     let raw: unknown
@@ -212,7 +214,7 @@ export class MiamiDadeORAdapter implements CountyAdapter {
       if (record) records.push(record)
     }
 
-    console.log(`[Miami-Dade OR] ${source}: ${rows.length} rows total, ${records.length} LP filings`)
+    console.log(`[Miami-Dade OR] ${source}: ${rows.length} rows total, ${records.length} distress filings`)
 
     return {
       county:   'miami-dade',

@@ -64,6 +64,7 @@ export async function GET(req: NextRequest) {
   const ai_score_min     = p.get('ai_score_min') ? parseInt(p.get('ai_score_min')!, 10) : null
   const lead_types_raw   = p.get('lead_types') || ''
   const lead_types       = lead_types_raw ? lead_types_raw.split(',').filter(Boolean) : []
+  const record_type      = p.get('record_type') || ''   // tab filter: lp | probate | auction | tax_deed | divorce
 
   const beds_min   = p.get('beds_min')   ? parseInt(p.get('beds_min')!, 10)   : null
   const beds_max   = p.get('beds_max')   ? parseInt(p.get('beds_max')!, 10)   : null
@@ -104,6 +105,7 @@ export async function GET(req: NextRequest) {
       case_number, file_date, plaintiff, mortgagor, foreclosure_amount,
       lender_name, foreclosure_type, multiple_liens,
       is_pre_foreclosure, is_foreclosure, is_auction, is_tax_lien,
+      is_probate, is_tax_deed, is_divorce,
       free_clear, high_equity,
       folio_number, owner_name, property_address, city, zip,
       beds, baths, year_built, living_area, lot_size,
@@ -192,6 +194,13 @@ export async function GET(req: NextRequest) {
       `subdivision_name.ilike.%${search}%,city.ilike.%${search}%`
     )
   }
+
+  // ── Record type tab filter ────────────────────────────────────────────────
+  if (record_type === 'lp')       query = query.eq('is_pre_foreclosure', true)
+  if (record_type === 'probate')  query = query.eq('is_probate', true)
+  if (record_type === 'auction')  query = query.eq('is_auction', true)
+  if (record_type === 'tax_deed') query = query.eq('is_tax_deed', true)
+  if (record_type === 'divorce')  query = query.eq('is_divorce', true)
 
   // ── Lead type OR filter ────────────────────────────────────────────────────
   // Each lead type maps to one or more PostgREST filter expressions.

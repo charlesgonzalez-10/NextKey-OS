@@ -180,21 +180,38 @@ async function ingestRecord(
 
   // ── 3. Upsert / insert property ───────────────────────────────────────────
   const entityType = detectEntityType(record.defendant)
+  const cat = record.lead_category
+
+  // Map lead_category → DB boolean flags + foreclosure_type code
+  const categoryFlags = {
+    is_pre_foreclosure: cat === 'lis_pendens',
+    is_probate:         cat === 'probate',
+    is_tax_deed:        cat === 'tax_deed',
+    is_divorce:         cat === 'divorce',
+    is_auction:         false,
+    multiple_liens:     false,
+    foreclosure_type:   cat === 'lis_pendens' ? 'P'
+                      : cat === 'probate'     ? 'PROB'
+                      : cat === 'tax_deed'    ? 'TAX'
+                      : cat === 'divorce'     ? 'DOM'
+                      : 'OTHER',
+  }
+
+  const countyLabel = record.county === 'miami-dade' ? 'MD'
+                    : record.county === 'broward'     ? 'Broward'
+                    : 'PBC'
 
   const propertyPayload = {
     scraper_run_id:     runId,
     source:             'or-ingestion',
     county:             record.county,
-    data_source:        `${record.county === 'miami-dade' ? 'MD' : record.county === 'broward' ? 'Broward' : 'PBC'} OR Index`,
+    data_source:        `${countyLabel} OR Index`,
     case_number:        record.case_number,
     file_date:          record.recording_date,
     plaintiff:          record.plaintiff,
     mortgagor:          record.defendant,
     foreclosure_amount: record.consideration ?? null,
-    foreclosure_type:   'P' as const,          // LP = pre-foreclosure
-    is_pre_foreclosure: true,
-    is_auction:         false,
-    multiple_liens:     false,
+    ...categoryFlags,
     folio_number:       resolution.folio_number ?? null,
     owner_name:         resolution.owner_name   ?? null,
     property_address:   resolution.property_address ?? record.property_address ?? null,
@@ -274,7 +291,7 @@ async function ingestRecord(
     .insert([{
       property_id:      propertyId,
       case_number:      record.case_number,
-      doc_type:         'LIS_PENDENS',
+      doc_type:         record.lead_category.toUpperCase(),   // LIS_PENDENS, PROBATE, TAX_DEED, DIVORCE
       county:           record.county,
       recording_date:   record.recording_date,
       plaintiff:        record.plaintiff,
@@ -304,9 +321,9 @@ async function ingestRecord(
       .from('leads')
       .insert([{
         property_id: propertyId,
-        status:      'new',      // matches CHECK constraint: 'new'|'reviewing'|…
+        status:      'new',
         source:      'or-ingestion',
-        tags:        ['lis-pendens'],
+        tags:        [record.lead_category.replace('_', '-')],   // lis-pendens, probate, tax-deed, divorce
       }])
       .select('id')
       .single()
