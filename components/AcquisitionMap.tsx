@@ -34,17 +34,45 @@ const SOUTH_FLORIDA_CENTER = { lat: 26.12, lng: -80.14 }
 const DEFAULT_ZOOM = 10
 
 const MAP_STYLES: google.maps.MapTypeStyle[] = [
-  { featureType: 'all',            elementType: 'labels.text.fill',  stylers: [{ color: '#9ca3af' }] },
-  { featureType: 'administrative', elementType: 'geometry.stroke',   stylers: [{ color: '#1e3a5f' }] },
+  // ── Base text — bright enough to read ──────────────────────────────────────
+  { featureType: 'all',                    elementType: 'labels.text.fill',   stylers: [{ color: '#d1d5db' }] },
+  { featureType: 'all',                    elementType: 'labels.text.stroke', stylers: [{ color: '#0a1f44' }, { weight: 3 }] },
+
+  // ── City / locality names — white & bold ───────────────────────────────────
+  { featureType: 'locality',               elementType: 'labels.text.fill',   stylers: [{ color: '#ffffff' }] },
+  { featureType: 'locality',               elementType: 'labels.text.stroke', stylers: [{ color: '#071829' }, { weight: 4 }] },
+  { featureType: 'administrative.locality',elementType: 'labels.text.fill',   stylers: [{ color: '#ffffff' }] },
+  { featureType: 'administrative.locality',elementType: 'labels.text.stroke', stylers: [{ color: '#071829' }, { weight: 4 }] },
+
+  // ── Neighbourhood / sublocality ────────────────────────────────────────────
+  { featureType: 'administrative.neighborhood', elementType: 'labels.text.fill',   stylers: [{ color: '#c9c9c9' }] },
+  { featureType: 'administrative.neighborhood', elementType: 'labels.text.stroke', stylers: [{ color: '#071829' }, { weight: 3 }] },
+
+  // ── County / state borders ─────────────────────────────────────────────────
+  { featureType: 'administrative', elementType: 'geometry.stroke',   stylers: [{ color: '#2d5a8e' }, { weight: 1.5 }] },
+  { featureType: 'administrative', elementType: 'labels.text.fill',  stylers: [{ color: '#a0aec0' }] },
+
+  // ── Landscape / land ───────────────────────────────────────────────────────
   { featureType: 'landscape',      elementType: 'geometry',          stylers: [{ color: '#0f2744' }] },
+
+  // ── POI — hide clutter ─────────────────────────────────────────────────────
   { featureType: 'poi',            elementType: 'geometry',          stylers: [{ color: '#0d2240' }] },
   { featureType: 'poi',            elementType: 'labels',            stylers: [{ visibility: 'off' }] },
-  { featureType: 'road',           elementType: 'geometry',          stylers: [{ color: '#1a3a5c' }] },
-  { featureType: 'road',           elementType: 'geometry.stroke',   stylers: [{ color: '#1a3a5c' }] },
-  { featureType: 'road',           elementType: 'labels.text.fill',  stylers: [{ color: '#6b7280' }] },
+
+  // ── Roads ──────────────────────────────────────────────────────────────────
+  { featureType: 'road',           elementType: 'geometry',          stylers: [{ color: '#1e4a7a' }] },
+  { featureType: 'road',           elementType: 'geometry.stroke',   stylers: [{ color: '#0f2f5c' }] },
+  { featureType: 'road',           elementType: 'labels.text.fill',  stylers: [{ color: '#94a3b8' }] },
+  { featureType: 'road',           elementType: 'labels.text.stroke',stylers: [{ color: '#0a1f44' }, { weight: 3 }] },
+  { featureType: 'road.highway',   elementType: 'labels.text.fill',  stylers: [{ color: '#e2e8f0' }] },
+
+  // ── Transit ────────────────────────────────────────────────────────────────
   { featureType: 'transit',        elementType: 'geometry',          stylers: [{ color: '#0d2240' }] },
+
+  // ── Water ──────────────────────────────────────────────────────────────────
   { featureType: 'water',          elementType: 'geometry',          stylers: [{ color: '#071829' }] },
-  { featureType: 'water',          elementType: 'labels.text.fill',  stylers: [{ color: '#1e3a5f' }] },
+  { featureType: 'water',          elementType: 'labels.text.fill',  stylers: [{ color: '#3b6ea5' }] },
+  { featureType: 'water',          elementType: 'labels.text.stroke',stylers: [{ color: '#071829' }, { weight: 2 }] },
 ]
 
 const MAP_OPTIONS: google.maps.MapOptions = {
