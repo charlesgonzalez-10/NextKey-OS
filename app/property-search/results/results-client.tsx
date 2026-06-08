@@ -288,18 +288,18 @@ function ResultRow({
         ) : <span style={{ color: 'var(--c-text-3)' }}>—</span>}
       </td>
 
-      {/* Add to Leads */}
+      {/* Add to Contacts */}
       <td className="py-3 pr-4" onClick={e => e.stopPropagation()}>
         {lead.lead_id ? (
           <span className="text-[9px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap"
             style={{ backgroundColor: 'rgba(76,175,154,0.15)', color: '#4CAF9A' }}>
-            In Leads
+            In Contacts
           </span>
         ) : (
           <button onClick={() => onAddToLeads(lead.id)}
             className="text-[10px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap hover:opacity-80"
             style={{ backgroundColor: 'rgba(201,168,76,0.15)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.3)' }}>
-            + Lead
+            + Contact
           </button>
         )}
       </td>
@@ -458,7 +458,7 @@ export default function SearchResultsClient() {
             <button onClick={bulkAddToLeads}
               className="text-[11px] font-bold px-3 py-1 rounded-xl hover:opacity-80"
               style={{ backgroundColor: '#C9A84C', color: '#0A1F44' }}>
-              + Add {selected.size} to Leads
+              + Add {selected.size} to Contacts
             </button>
             <button onClick={exportCSV}
               className="text-[11px] font-semibold px-2.5 py-1 rounded-xl hover:opacity-80"
