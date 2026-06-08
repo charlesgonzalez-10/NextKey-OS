@@ -231,19 +231,6 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
     saveTerritories(next)
   }
 
-  // ── Drawing manager options ────────────────────────────────────────────────
-
-  const drawingManagerOptions: google.maps.drawing.DrawingManagerOptions = {
-    drawingMode: drawMode === 'idle' ? null
-      : drawMode === 'polygon'   ? google.maps.drawing.OverlayType.POLYGON
-      : drawMode === 'rectangle' ? google.maps.drawing.OverlayType.RECTANGLE
-      : google.maps.drawing.OverlayType.CIRCLE,
-    drawingControl: false,
-    polygonOptions:   { fillColor: DRAW_FILL,      strokeColor: DRAW_COLOR, strokeWeight: 2, clickable: false, editable: true },
-    rectangleOptions: { fillColor: DRAW_FILL,      strokeColor: DRAW_COLOR, strokeWeight: 2, clickable: false, editable: true },
-    circleOptions:    { fillColor: DRAW_FILL_DARK, strokeColor: DRAW_COLOR, strokeWeight: 2, clickable: false, editable: true },
-  }
-
   // ── Render ─────────────────────────────────────────────────────────────────
 
   if (loadError) {
@@ -264,6 +251,19 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
         </div>
       </div>
     )
+  }
+
+  // ── Drawing manager options (only safe to build after google is loaded) ────
+
+  const drawingManagerOptions: google.maps.drawing.DrawingManagerOptions = {
+    drawingMode: drawMode === 'idle' ? null
+      : drawMode === 'polygon'   ? google.maps.drawing.OverlayType.POLYGON
+      : drawMode === 'rectangle' ? google.maps.drawing.OverlayType.RECTANGLE
+      : google.maps.drawing.OverlayType.CIRCLE,
+    drawingControl: false,
+    polygonOptions:   { fillColor: DRAW_FILL,      strokeColor: DRAW_COLOR, strokeWeight: 2, clickable: false, editable: true },
+    rectangleOptions: { fillColor: DRAW_FILL,      strokeColor: DRAW_COLOR, strokeWeight: 2, clickable: false, editable: true },
+    circleOptions:    { fillColor: DRAW_FILL_DARK, strokeColor: DRAW_COLOR, strokeWeight: 2, clickable: false, editable: true },
   }
 
   const zoneLabel = currentZone
