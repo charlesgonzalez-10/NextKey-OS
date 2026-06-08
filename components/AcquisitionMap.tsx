@@ -3,20 +3,23 @@
 /**
  * AcquisitionMap — interactive map for the Property Search criteria builder.
  *
- * Features:
- *  - Google Maps centered on South Florida
- *  - Drawing Manager: polygon, rectangle, circle (Draw Zone mode)
- *  - Layer toggles: Pre-Foreclosure, Probate, Tax Deed, Vacant, High Equity, My Leads
- *  - Saved territories (stored in localStorage; DB persistence is Phase 2)
- *  - Emits drawn zone geometry to parent via onZoneDrawn callback
+ * Drawing is implemented WITHOUT google.maps.drawing.DrawingManager
+ * (deprecated and removed in Maps API v3.65). All shapes are drawn via
+ * click events on the GoogleMap component + Polygon/Rectangle/Circle overlays.
+ *
+ * Supported draw tools:
+ *   Polygon   — click to place vertices; click near first vertex (or press
+ *               "Complete") to close the shape.
+ *   Rectangle — first click sets one corner; second click sets the opposite.
+ *   Circle    — first click sets center; second click sets radius point.
  */
 
 import { useCallback, useRef, useState } from 'react'
 import {
   GoogleMap,
   useLoadScript,
-  DrawingManager,
   Polygon,
+  Polyline,
   Rectangle,
   Circle,
   OverlayView,
@@ -24,33 +27,35 @@ import {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const LIBRARIES: ('drawing' | 'places' | 'geometry')[] = ['drawing', 'geometry']
+// geometry only — no 'drawing' library needed
+const LIBRARIES: ('geometry' | 'places')[] = ['geometry']
 
 const SOUTH_FLORIDA_CENTER = { lat: 26.12, lng: -80.14 }
 const DEFAULT_ZOOM = 10
 
 const MAP_STYLES: google.maps.MapTypeStyle[] = [
-  { featureType: 'all',              elementType: 'labels.text.fill',   stylers: [{ color: '#9ca3af' }] },
-  { featureType: 'administrative',   elementType: 'geometry.stroke',    stylers: [{ color: '#1e3a5f' }] },
-  { featureType: 'landscape',        elementType: 'geometry',           stylers: [{ color: '#0f2744' }] },
-  { featureType: 'poi',              elementType: 'geometry',           stylers: [{ color: '#0d2240' }] },
-  { featureType: 'poi',              elementType: 'labels',             stylers: [{ visibility: 'off' }] },
-  { featureType: 'road',             elementType: 'geometry',           stylers: [{ color: '#1a3a5c' }] },
-  { featureType: 'road',             elementType: 'geometry.stroke',    stylers: [{ color: '#1a3a5c' }] },
-  { featureType: 'road',             elementType: 'labels.text.fill',   stylers: [{ color: '#6b7280' }] },
-  { featureType: 'transit',          elementType: 'geometry',           stylers: [{ color: '#0d2240' }] },
-  { featureType: 'water',            elementType: 'geometry',           stylers: [{ color: '#071829' }] },
-  { featureType: 'water',            elementType: 'labels.text.fill',   stylers: [{ color: '#1e3a5f' }] },
+  { featureType: 'all',            elementType: 'labels.text.fill',  stylers: [{ color: '#9ca3af' }] },
+  { featureType: 'administrative', elementType: 'geometry.stroke',   stylers: [{ color: '#1e3a5f' }] },
+  { featureType: 'landscape',      elementType: 'geometry',          stylers: [{ color: '#0f2744' }] },
+  { featureType: 'poi',            elementType: 'geometry',          stylers: [{ color: '#0d2240' }] },
+  { featureType: 'poi',            elementType: 'labels',            stylers: [{ visibility: 'off' }] },
+  { featureType: 'road',           elementType: 'geometry',          stylers: [{ color: '#1a3a5c' }] },
+  { featureType: 'road',           elementType: 'geometry.stroke',   stylers: [{ color: '#1a3a5c' }] },
+  { featureType: 'road',           elementType: 'labels.text.fill',  stylers: [{ color: '#6b7280' }] },
+  { featureType: 'transit',        elementType: 'geometry',          stylers: [{ color: '#0d2240' }] },
+  { featureType: 'water',          elementType: 'geometry',          stylers: [{ color: '#071829' }] },
+  { featureType: 'water',          elementType: 'labels.text.fill',  stylers: [{ color: '#1e3a5f' }] },
 ]
 
 const MAP_OPTIONS: google.maps.MapOptions = {
-  styles:           MAP_STYLES,
-  disableDefaultUI: false,
-  zoomControl:      true,
-  mapTypeControl:   false,
+  styles:            MAP_STYLES,
+  disableDefaultUI:  false,
+  zoomControl:       true,
+  mapTypeControl:    false,
   streetViewControl: false,
   fullscreenControl: false,
-  clickableIcons:   false,
+  clickableIcons:    false,
+  // Disable all default gestures that conflict with draw mode
 }
 
 export type LayerKey =
@@ -63,30 +68,26 @@ export type LayerKey =
 
 const LAYER_META: Record<LayerKey, { label: string; color: string; emoji: string }> = {
   pre_foreclosure: { label: 'Pre-Foreclosure', color: '#f59e0b', emoji: '⚡' },
-  probate:         { label: 'Probate',          color: '#a78bfa', emoji: '⚖️' },
-  tax_deed:        { label: 'Tax Deed',         color: '#f97316', emoji: '🏛️' },
-  vacant:          { label: 'Vacant',           color: '#6ABDE0', emoji: '🏚️' },
+  probate:         { label: 'Probate',          color: '#a78bfa', emoji: '⚖' },
+  tax_deed:        { label: 'Tax Deed',         color: '#f97316', emoji: '🏛' },
+  vacant:          { label: 'Vacant',           color: '#6ABDE0', emoji: '🏚' },
   high_equity:     { label: 'High Equity',      color: '#4CAF9A', emoji: '💰' },
-  my_leads:        { label: 'My Leads',         color: '#C9A84C', emoji: '⭐' },
+  my_leads:        { label: 'My Leads',         color: '#C9A84C', emoji: '★' },
 }
 
 export interface DrawnZone {
   type:    'polygon' | 'rectangle' | 'circle'
-  // polygon: array of lat/lng pairs
   path?:   { lat: number; lng: number }[]
-  // rectangle: bounds
   bounds?: { north: number; south: number; east: number; west: number }
-  // circle: center + radius
   center?: { lat: number; lng: number }
-  radius?: number   // metres
-  // human-readable label derived from reverse geocode
+  radius?: number
   label?:  string
 }
 
 export interface SavedTerritory {
-  id:    string
-  name:  string
-  zone:  DrawnZone
+  id:   string
+  name: string
+  zone: DrawnZone
 }
 
 interface Props {
@@ -95,7 +96,31 @@ interface Props {
   className?: string
 }
 
-// ─── Saved territories (localStorage) ────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+type LatLng = { lat: number; lng: number }
+
+function latlngDist(a: LatLng, b: LatLng) {
+  return Math.sqrt((a.lat - b.lat) ** 2 + (a.lng - b.lng) ** 2)
+}
+
+function latLngRadiusMetres(center: LatLng, edge: LatLng) {
+  // Rough conversion: 1 degree lat ≈ 111_000 m
+  const dLat = (edge.lat - center.lat) * 111_000
+  const dLng = (edge.lng - center.lng) * 111_000 * Math.cos(center.lat * Math.PI / 180)
+  return Math.sqrt(dLat ** 2 + dLng ** 2)
+}
+
+function rectBounds(a: LatLng, b: LatLng) {
+  return {
+    north: Math.max(a.lat, b.lat),
+    south: Math.min(a.lat, b.lat),
+    east:  Math.max(a.lng, b.lng),
+    west:  Math.min(a.lng, b.lng),
+  }
+}
+
+// ─── localStorage helpers ─────────────────────────────────────────────────────
 
 function loadTerritories(): SavedTerritory[] {
   if (typeof window === 'undefined') return []
@@ -105,11 +130,14 @@ function saveTerritories(t: SavedTerritory[]): void {
   localStorage.setItem('nk_territories', JSON.stringify(t))
 }
 
-// ─── Drawing colour palette ───────────────────────────────────────────────────
+// ─── Draw colour palette ───────────────────────────────────────────────────────
 
 const DRAW_COLOR     = '#C9A84C'
 const DRAW_FILL      = 'rgba(201,168,76,0.15)'
 const DRAW_FILL_DARK = 'rgba(201,168,76,0.08)'
+const POLY_OPTS  = { fillColor: DRAW_FILL,      strokeColor: DRAW_COLOR, strokeWeight: 2, clickable: false }
+const CIRC_OPTS  = { fillColor: DRAW_FILL_DARK, strokeColor: DRAW_COLOR, strokeWeight: 2, clickable: false }
+const GHOST_OPTS = { fillColor: 'rgba(255,255,255,0.03)', strokeColor: 'rgba(255,255,255,0.2)', strokeWeight: 1, clickable: false }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -119,84 +147,92 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
     libraries: LIBRARIES,
   })
 
-  const mapRef   = useRef<google.maps.Map | null>(null)
+  const mapRef = useRef<google.maps.Map | null>(null)
   const onMapLoad = useCallback((map: google.maps.Map) => { mapRef.current = map }, [])
 
-  // Drawing mode
-  const [drawMode, setDrawMode]       = useState<'idle' | 'polygon' | 'rectangle' | 'circle'>('idle')
-  const [currentZone, setCurrentZone] = useState<DrawnZone | null>(null)
-  const [overlayRef, setOverlayRef]   = useState<google.maps.MVCObject | null>(null)
+  // ── Draw state ────────────────────────────────────────────────────────────
+  type DrawMode = 'idle' | 'polygon' | 'rectangle' | 'circle'
+  const [drawMode, setDrawMode]         = useState<DrawMode>('idle')
+  const [polyVerts, setPolyVerts]       = useState<LatLng[]>([])   // polygon vertices in progress
+  const [drawStart, setDrawStart]       = useState<LatLng | null>(null)   // rect/circle first click
+  const [mousePos,  setMousePos]        = useState<LatLng | null>(null)   // mouse for previews
+  const [currentZone, setCurrentZone]   = useState<DrawnZone | null>(null)
 
-  // Territories
-  const [territories, setTerritories]   = useState<SavedTerritory[]>(() => loadTerritories())
-  const [savingName, setSavingName]     = useState('')
+  // ── Territories ───────────────────────────────────────────────────────────
+  const [territories,   setTerritories]   = useState<SavedTerritory[]>(() => loadTerritories())
+  const [savingName,    setSavingName]     = useState('')
   const [showSaveInput, setShowSaveInput] = useState(false)
 
-  // Active layers
+  // ── Layers ────────────────────────────────────────────────────────────────
   const [localLayers, setLocalLayers] = useState<Set<LayerKey>>(activeLayers ?? new Set())
+  const toggleLayer = (k: LayerKey) => setLocalLayers(prev => {
+    const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n
+  })
 
-  const toggleLayer = (k: LayerKey) => {
-    setLocalLayers(prev => {
-      const n = new Set(prev)
-      n.has(k) ? n.delete(k) : n.add(k)
-      return n
-    })
-  }
-
-  // ── Drawing callbacks ──────────────────────────────────────────────────────
+  // ── Commit a completed zone ───────────────────────────────────────────────
+  const commitZone = useCallback((zone: DrawnZone) => {
+    setCurrentZone(zone)
+    setDrawMode('idle')
+    setPolyVerts([])
+    setDrawStart(null)
+    setMousePos(null)
+    onZoneDrawn?.(zone)
+  }, [onZoneDrawn])
 
   const clearZone = useCallback(() => {
-    // Remove existing overlay from map
-    if (overlayRef && 'setMap' in overlayRef) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ;(overlayRef as any).setMap(null)
-    }
-    setOverlayRef(null)
     setCurrentZone(null)
     setDrawMode('idle')
+    setPolyVerts([])
+    setDrawStart(null)
+    setMousePos(null)
     onZoneDrawn?.(null)
-  }, [overlayRef, onZoneDrawn])
-
-  const handlePolygonComplete = useCallback((poly: google.maps.Polygon) => {
-    poly.setOptions({ fillColor: DRAW_FILL, strokeColor: DRAW_COLOR, strokeWeight: 2 })
-    setOverlayRef(poly)
-    const path = poly.getPath().getArray().map(ll => ({ lat: ll.lat(), lng: ll.lng() }))
-    const zone: DrawnZone = { type: 'polygon', path }
-    setCurrentZone(zone)
-    setDrawMode('idle')
-    onZoneDrawn?.(zone)
   }, [onZoneDrawn])
 
-  const handleRectangleComplete = useCallback((rect: google.maps.Rectangle) => {
-    rect.setOptions({ fillColor: DRAW_FILL, strokeColor: DRAW_COLOR, strokeWeight: 2 })
-    setOverlayRef(rect)
-    const b = rect.getBounds()!
-    const zone: DrawnZone = {
-      type: 'rectangle',
-      bounds: { north: b.getNorthEast().lat(), south: b.getSouthWest().lat(),
-                east:  b.getNorthEast().lng(), west:  b.getSouthWest().lng() },
+  // ── Map click handler (drives all draw modes) ─────────────────────────────
+  const handleMapClick = useCallback((e: google.maps.MapMouseEvent) => {
+    if (drawMode === 'idle' || !e.latLng) return
+    const pt: LatLng = { lat: e.latLng.lat(), lng: e.latLng.lng() }
+
+    if (drawMode === 'polygon') {
+      // Close if clicking near first vertex (≤ 0.002° / ~200m) and have ≥3 verts
+      if (polyVerts.length >= 3 && latlngDist(pt, polyVerts[0]) < 0.002) {
+        commitZone({ type: 'polygon', path: polyVerts })
+        return
+      }
+      setPolyVerts(prev => [...prev, pt])
+
+    } else if (drawMode === 'rectangle') {
+      if (!drawStart) {
+        setDrawStart(pt)
+      } else {
+        commitZone({ type: 'rectangle', bounds: rectBounds(drawStart, pt) })
+      }
+
+    } else if (drawMode === 'circle') {
+      if (!drawStart) {
+        setDrawStart(pt)
+      } else {
+        commitZone({
+          type:   'circle',
+          center: drawStart,
+          radius: latLngRadiusMetres(drawStart, pt),
+        })
+      }
     }
-    setCurrentZone(zone)
-    setDrawMode('idle')
-    onZoneDrawn?.(zone)
-  }, [onZoneDrawn])
+  }, [drawMode, polyVerts, drawStart, commitZone])
 
-  const handleCircleComplete = useCallback((circle: google.maps.Circle) => {
-    circle.setOptions({ fillColor: DRAW_FILL_DARK, strokeColor: DRAW_COLOR, strokeWeight: 2 })
-    setOverlayRef(circle)
-    const center = circle.getCenter()!
-    const zone: DrawnZone = {
-      type: 'circle',
-      center: { lat: center.lat(), lng: center.lng() },
-      radius: circle.getRadius(),
-    }
-    setCurrentZone(zone)
-    setDrawMode('idle')
-    onZoneDrawn?.(zone)
-  }, [onZoneDrawn])
+  // ── Mouse-move for draw preview ───────────────────────────────────────────
+  const handleMouseMove = useCallback((e: google.maps.MapMouseEvent) => {
+    if (drawMode === 'idle' || !e.latLng) return
+    setMousePos({ lat: e.latLng.lat(), lng: e.latLng.lng() })
+  }, [drawMode])
 
-  // ── Save / load territory ─────────────────────────────────────────────────
+  // ── Complete polygon via button ───────────────────────────────────────────
+  const completePoly = () => {
+    if (polyVerts.length >= 3) commitZone({ type: 'polygon', path: polyVerts })
+  }
 
+  // ── Territory actions ─────────────────────────────────────────────────────
   const saveTerritory = () => {
     if (!currentZone || !savingName.trim()) return
     const t: SavedTerritory = { id: crypto.randomUUID(), name: savingName.trim(), zone: currentZone }
@@ -211,7 +247,6 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
     clearZone()
     setCurrentZone(t.zone)
     onZoneDrawn?.(t.zone)
-    // Fit map to zone
     if (!mapRef.current) return
     if (t.zone.type === 'rectangle' && t.zone.bounds) {
       mapRef.current.fitBounds(t.zone.bounds)
@@ -231,7 +266,30 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
     saveTerritories(next)
   }
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // ── Preview shape helpers ─────────────────────────────────────────────────
+
+  // Rectangle preview: stretch between drawStart and current mouse
+  const previewRectBounds = drawStart && mousePos ? rectBounds(drawStart, mousePos) : null
+
+  // Circle preview: expand from drawStart to current mouse
+  const previewCircleRadius = drawStart && mousePos ? latLngRadiusMetres(drawStart, mousePos) : 0
+
+  // Polygon preview: current verts + line to mouse
+  const previewPolyPath = mousePos && polyVerts.length > 0
+    ? [...polyVerts, mousePos]
+    : polyVerts
+
+  // ── Cursors ───────────────────────────────────────────────────────────────
+  const cursor = drawMode === 'idle' ? 'default' : 'crosshair'
+
+  // ── Zone label ────────────────────────────────────────────────────────────
+  const zoneLabel = currentZone
+    ? currentZone.type === 'circle'
+      ? `circle · ${((currentZone.radius ?? 0) / 1609).toFixed(1)} mi radius`
+      : `${currentZone.type} zone drawn`
+    : null
+
+  // ── Render guards ─────────────────────────────────────────────────────────
 
   if (loadError) {
     return (
@@ -253,74 +311,99 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
     )
   }
 
-  // ── Drawing manager options (only safe to build after google is loaded) ────
-
-  const drawingManagerOptions: google.maps.drawing.DrawingManagerOptions = {
-    drawingMode: drawMode === 'idle' ? null
-      : drawMode === 'polygon'   ? google.maps.drawing.OverlayType.POLYGON
-      : drawMode === 'rectangle' ? google.maps.drawing.OverlayType.RECTANGLE
-      : google.maps.drawing.OverlayType.CIRCLE,
-    drawingControl: false,
-    polygonOptions:   { fillColor: DRAW_FILL,      strokeColor: DRAW_COLOR, strokeWeight: 2, clickable: false, editable: true },
-    rectangleOptions: { fillColor: DRAW_FILL,      strokeColor: DRAW_COLOR, strokeWeight: 2, clickable: false, editable: true },
-    circleOptions:    { fillColor: DRAW_FILL_DARK, strokeColor: DRAW_COLOR, strokeWeight: 2, clickable: false, editable: true },
-  }
-
-  const zoneLabel = currentZone
-    ? currentZone.type === 'circle'
-      ? `${currentZone.type} · ${((currentZone.radius ?? 0) / 1609).toFixed(1)} mi radius`
-      : `${currentZone.type} zone drawn`
-    : null
+  // ── Full render ────────────────────────────────────────────────────────────
 
   return (
     <div className={`relative flex flex-col ${className ?? ''}`}>
 
-      {/* ── Map ─────────────────────────────────────────────────────────── */}
-      <div className="flex-1 min-h-0 rounded-2xl overflow-hidden">
+      {/* ── Map ────────────────────────────────────────────────────────────── */}
+      <div className="flex-1 min-h-0 rounded-2xl overflow-hidden" style={{ cursor }}>
         <GoogleMap
           mapContainerStyle={{ width: '100%', height: '100%' }}
           center={SOUTH_FLORIDA_CENTER}
           zoom={DEFAULT_ZOOM}
           options={MAP_OPTIONS}
           onLoad={onMapLoad}
+          onClick={handleMapClick}
+          onMouseMove={handleMouseMove}
         >
-          <DrawingManager
-            options={drawingManagerOptions}
-            onPolygonComplete={handlePolygonComplete}
-            onRectangleComplete={handleRectangleComplete}
-            onCircleComplete={handleCircleComplete}
-          />
+          {/* ── Completed zone overlays ─── */}
+          {currentZone?.type === 'polygon' && currentZone.path && (
+            <Polygon paths={currentZone.path} options={POLY_OPTS} />
+          )}
+          {currentZone?.type === 'rectangle' && currentZone.bounds && (
+            <Rectangle bounds={currentZone.bounds} options={POLY_OPTS} />
+          )}
+          {currentZone?.type === 'circle' && currentZone.center && (
+            <Circle center={currentZone.center} radius={currentZone.radius ?? 1000} options={CIRC_OPTS} />
+          )}
 
-          {/* Render saved territory zones as ghost overlays */}
+          {/* ── In-progress polygon preview ─── */}
+          {drawMode === 'polygon' && previewPolyPath.length > 1 && (
+            <Polyline
+              path={previewPolyPath}
+              options={{ strokeColor: DRAW_COLOR, strokeWeight: 2, strokeOpacity: 0.8, geodesic: false }}
+            />
+          )}
+
+          {/* ── Polygon vertex dots ─── */}
+          {drawMode === 'polygon' && polyVerts.map((v, i) => (
+            <OverlayView key={i} position={v} mapPaneName="overlayLayer">
+              <div
+                title={i === 0 && polyVerts.length >= 3 ? 'Click to close polygon' : undefined}
+                style={{
+                  width: 10, height: 10,
+                  borderRadius: '50%',
+                  backgroundColor: i === 0 && polyVerts.length >= 3 ? '#C9A84C' : '#ffffff',
+                  border: `2px solid ${DRAW_COLOR}`,
+                  transform: 'translate(-50%, -50%)',
+                  cursor: i === 0 && polyVerts.length >= 3 ? 'pointer' : 'default',
+                  boxShadow: '0 0 4px rgba(0,0,0,0.5)',
+                }}
+              />
+            </OverlayView>
+          ))}
+
+          {/* ── Rectangle preview (while drawing) ─── */}
+          {drawMode === 'rectangle' && previewRectBounds && (
+            <Rectangle bounds={previewRectBounds} options={{ ...POLY_OPTS, strokeOpacity: 0.6, fillOpacity: 0.08 }} />
+          )}
+
+          {/* ── Circle preview (while drawing) ─── */}
+          {drawMode === 'circle' && drawStart && mousePos && (
+            <Circle
+              center={drawStart}
+              radius={previewCircleRadius}
+              options={{ ...CIRC_OPTS, strokeOpacity: 0.6, fillOpacity: 0.05 }}
+            />
+          )}
+
+          {/* ── Rectangle/circle first-click marker ─── */}
+          {(drawMode === 'rectangle' || drawMode === 'circle') && drawStart && (
+            <OverlayView position={drawStart} mapPaneName="overlayLayer">
+              <div style={{
+                width: 10, height: 10, borderRadius: '50%',
+                backgroundColor: '#C9A84C', border: '2px solid #C9A84C',
+                transform: 'translate(-50%, -50%)',
+                boxShadow: '0 0 4px rgba(0,0,0,0.5)',
+              }} />
+            </OverlayView>
+          )}
+
+          {/* ── Saved territory ghost overlays ─── */}
           {territories.map(t => {
-            if (t.zone.type === 'polygon' && t.zone.path) {
-              return (
-                <Polygon key={t.id}
-                  paths={t.zone.path}
-                  options={{ fillColor: 'rgba(255,255,255,0.03)', strokeColor: 'rgba(255,255,255,0.2)', strokeWeight: 1 }} />
-              )
-            }
-            if (t.zone.type === 'rectangle' && t.zone.bounds) {
-              return (
-                <Rectangle key={t.id}
-                  bounds={t.zone.bounds}
-                  options={{ fillColor: 'rgba(255,255,255,0.03)', strokeColor: 'rgba(255,255,255,0.2)', strokeWeight: 1 }} />
-              )
-            }
-            if (t.zone.type === 'circle' && t.zone.center) {
-              return (
-                <Circle key={t.id}
-                  center={t.zone.center}
-                  radius={t.zone.radius ?? 1000}
-                  options={{ fillColor: 'rgba(255,255,255,0.03)', strokeColor: 'rgba(255,255,255,0.2)', strokeWeight: 1 }} />
-              )
-            }
+            if (t.zone.type === 'polygon' && t.zone.path)
+              return <Polygon key={t.id} paths={t.zone.path} options={GHOST_OPTS} />
+            if (t.zone.type === 'rectangle' && t.zone.bounds)
+              return <Rectangle key={t.id} bounds={t.zone.bounds} options={GHOST_OPTS} />
+            if (t.zone.type === 'circle' && t.zone.center)
+              return <Circle key={t.id} center={t.zone.center} radius={t.zone.radius ?? 1000} options={{ ...GHOST_OPTS }} />
             return null
           })}
 
-          {/* Territory labels */}
+          {/* ── Territory name labels ─── */}
           {territories.map(t => {
-            let pos: google.maps.LatLngLiteral | null = null
+            let pos: LatLng | null = null
             if (t.zone.type === 'polygon' && t.zone.path?.length) {
               const lats = t.zone.path.map(p => p.lat), lngs = t.zone.path.map(p => p.lng)
               pos = { lat: (Math.min(...lats) + Math.max(...lats)) / 2, lng: (Math.min(...lngs) + Math.max(...lngs)) / 2 }
@@ -331,9 +414,9 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
             }
             if (!pos) return null
             return (
-              <OverlayView key={`label-${t.id}`} position={pos} mapPaneName="overlayLayer">
+              <OverlayView key={`lbl-${t.id}`} position={pos} mapPaneName="overlayLayer">
                 <div className="text-[10px] font-bold px-1.5 py-0.5 rounded whitespace-nowrap select-none"
-                  style={{ backgroundColor: 'rgba(10,31,68,0.85)', color: 'rgba(255,255,255,0.5)', border: '1px solid rgba(255,255,255,0.15)', transform: 'translate(-50%, -50%)' }}>
+                  style={{ backgroundColor: 'rgba(10,31,68,0.85)', color: 'rgba(255,255,255,0.5)', border: '1px solid rgba(255,255,255,0.15)', transform: 'translate(-50%,-50%)' }}>
                   {t.name}
                 </div>
               </OverlayView>
@@ -342,15 +425,21 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
         </GoogleMap>
       </div>
 
-      {/* ── Controls overlay ─────────────────────────────────────────────── */}
+      {/* ── Controls overlay ────────────────────────────────────────────────── */}
       <div className="absolute top-3 left-3 right-3 flex flex-col gap-2 pointer-events-none">
 
-        {/* Draw zone toolbar */}
-        <div className="flex items-center gap-1.5 pointer-events-auto">
-          {/* Draw mode buttons */}
+        {/* Draw toolbar */}
+        <div className="flex items-center gap-1.5 flex-wrap pointer-events-auto">
+
+          {/* Tool buttons */}
           {(['polygon', 'rectangle', 'circle'] as const).map(mode => (
             <button key={mode}
-              onClick={() => setDrawMode(prev => prev === mode ? 'idle' : mode)}
+              onClick={() => {
+                setDrawMode(prev => prev === mode ? 'idle' : mode)
+                setPolyVerts([])
+                setDrawStart(null)
+                setMousePos(null)
+              }}
               className="flex items-center gap-1 text-[11px] font-bold px-2.5 py-1.5 rounded-lg transition-all"
               style={{
                 backgroundColor: drawMode === mode ? '#C9A84C' : 'rgba(10,31,68,0.9)',
@@ -363,91 +452,111 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
             </button>
           ))}
 
-          {currentZone && (
-            <button onClick={clearZone}
-              className="text-[11px] font-bold px-2.5 py-1.5 rounded-lg transition-all ml-1"
-              style={{ backgroundColor: 'rgba(239,68,68,0.2)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.3)', backdropFilter: 'blur(8px)' }}>
-              ✕ Clear Zone
+          {/* Complete polygon button */}
+          {drawMode === 'polygon' && polyVerts.length >= 3 && (
+            <button onClick={completePoly}
+              className="text-[11px] font-bold px-2.5 py-1.5 rounded-lg ml-1"
+              style={{ backgroundColor: '#4CAF9A', color: '#0A1F44', backdropFilter: 'blur(8px)' }}>
+              ✓ Complete
             </button>
           )}
 
-          {currentZone && (
-            <button onClick={() => setShowSaveInput(v => !v)}
-              className="text-[11px] font-bold px-2.5 py-1.5 rounded-lg transition-all"
-              style={{ backgroundColor: 'rgba(10,31,68,0.9)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.3)', backdropFilter: 'blur(8px)' }}>
+          {/* Clear zone */}
+          {(currentZone || polyVerts.length > 0 || drawStart) && (
+            <button onClick={clearZone}
+              className="text-[11px] font-bold px-2.5 py-1.5 rounded-lg ml-1"
+              style={{ backgroundColor: 'rgba(239,68,68,0.2)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.3)', backdropFilter: 'blur(8px)' }}>
+              ✕ Clear
+            </button>
+          )}
+
+          {/* Save zone as territory */}
+          {currentZone && !showSaveInput && (
+            <button onClick={() => setShowSaveInput(true)}
+              className="text-[11px] font-bold px-2.5 py-1.5 rounded-lg ml-auto"
+              style={{ backgroundColor: 'rgba(10,31,68,0.9)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.4)', backdropFilter: 'blur(8px)' }}>
               + Save Territory
             </button>
           )}
         </div>
 
-        {/* Zone drawn notice */}
-        {zoneLabel && (
-          <div className="self-start text-[11px] font-semibold px-2.5 py-1 rounded-lg pointer-events-none"
-            style={{ backgroundColor: 'rgba(10,31,68,0.9)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.2)', backdropFilter: 'blur(8px)' }}>
-            ✓ {zoneLabel}
-          </div>
-        )}
-
         {/* Save territory input */}
         {showSaveInput && (
-          <div className="flex items-center gap-2 pointer-events-auto"
-            style={{ backgroundColor: 'rgba(10,31,68,0.95)', border: '1px solid rgba(201,168,76,0.3)', backdropFilter: 'blur(8px)', borderRadius: 10, padding: '8px 10px' }}>
+          <div className="flex items-center gap-2 pointer-events-auto">
             <input
               autoFocus
               value={savingName}
               onChange={e => setSavingName(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') saveTerritory(); if (e.key === 'Escape') setShowSaveInput(false) }}
-              placeholder="Territory name (e.g. East Boca)"
-              className="flex-1 bg-transparent text-sm focus:outline-none text-white placeholder-white/30"
+              placeholder='Territory name (e.g. "Weston")'
+              className="flex-1 text-[11px] px-2.5 py-1.5 rounded-lg focus:outline-none"
+              style={{ backgroundColor: 'rgba(10,31,68,0.95)', border: '1px solid rgba(201,168,76,0.5)', color: '#ffffff', backdropFilter: 'blur(8px)' }}
             />
             <button onClick={saveTerritory}
-              className="text-xs font-bold px-2.5 py-1 rounded-lg"
+              className="text-[11px] font-bold px-3 py-1.5 rounded-lg"
               style={{ backgroundColor: '#C9A84C', color: '#0A1F44' }}>
               Save
             </button>
             <button onClick={() => setShowSaveInput(false)}
-              className="text-xs px-1.5" style={{ color: 'rgba(255,255,255,0.4)' }}>✕</button>
+              className="text-[11px] px-2 py-1.5 rounded-lg"
+              style={{ backgroundColor: 'rgba(10,31,68,0.9)', color: 'rgba(255,255,255,0.5)', border: '1px solid rgba(255,255,255,0.1)', backdropFilter: 'blur(8px)' }}>
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* Zone label + draw hint */}
+        {(zoneLabel || (drawMode !== 'idle')) && (
+          <div className="pointer-events-none">
+            <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full"
+              style={{ backgroundColor: 'rgba(10,31,68,0.85)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.3)', backdropFilter: 'blur(8px)' }}>
+              {zoneLabel ?? (
+                drawMode === 'polygon'
+                  ? polyVerts.length === 0
+                    ? 'Click to place first vertex'
+                    : polyVerts.length < 3
+                      ? `${polyVerts.length} vertex${polyVerts.length > 1 ? 'es' : ''} — keep clicking`
+                      : 'Click near first vertex to close, or press Complete'
+                  : drawMode === 'rectangle'
+                    ? drawStart ? 'Click opposite corner to complete' : 'Click first corner'
+                    : drawStart ? 'Click any point to set radius' : 'Click to set center'
+              )}
+            </span>
           </div>
         )}
       </div>
 
-      {/* ── Layer toggles (bottom-left) ───────────────────────────────────── */}
-      <div className="absolute bottom-3 left-3 flex flex-col gap-1.5">
-        <p className="text-[9px] font-bold tracking-widest" style={{ color: 'rgba(255,255,255,0.3)' }}>LAYERS</p>
-        <div className="flex flex-col gap-1">
-          {(Object.keys(LAYER_META) as LayerKey[]).map(k => {
-            const { label, color, emoji } = LAYER_META[k]
-            const on = localLayers.has(k)
-            return (
-              <button key={k} onClick={() => toggleLayer(k)}
-                className="flex items-center gap-1.5 text-[10px] font-semibold px-2.5 py-1 rounded-lg transition-all"
-                style={{
-                  backgroundColor: on ? `${color}25` : 'rgba(10,31,68,0.85)',
-                  color:            on ? color : 'rgba(255,255,255,0.4)',
-                  border:           `1px solid ${on ? color + '50' : 'rgba(255,255,255,0.1)'}`,
-                  backdropFilter:   'blur(8px)',
-                }}>
-                <span>{emoji}</span> {label}
-              </button>
-            )
-          })}
-        </div>
+      {/* ── Layer toggles (bottom-left) ──────────────────────────────────────── */}
+      <div className="absolute bottom-14 left-3 flex flex-col gap-1 pointer-events-auto">
+        {(Object.entries(LAYER_META) as [LayerKey, typeof LAYER_META[LayerKey]][]).map(([key, meta]) => (
+          <button key={key} onClick={() => toggleLayer(key)}
+            className="flex items-center gap-1.5 text-[10px] font-bold px-2 py-1 rounded-lg transition-all"
+            style={{
+              backgroundColor: localLayers.has(key) ? `${meta.color}25` : 'rgba(10,31,68,0.85)',
+              color: localLayers.has(key) ? meta.color : 'rgba(255,255,255,0.4)',
+              border: `1px solid ${localLayers.has(key) ? meta.color + '60' : 'rgba(255,255,255,0.1)'}`,
+              backdropFilter: 'blur(8px)',
+            }}>
+            <span>{meta.emoji}</span> {meta.label}
+          </button>
+        ))}
       </div>
 
-      {/* ── Saved territories (bottom-right) ─────────────────────────────── */}
+      {/* ── Saved territories list (bottom-right) ───────────────────────────── */}
       {territories.length > 0 && (
-        <div className="absolute bottom-3 right-3 flex flex-col gap-1.5 max-w-[180px]">
-          <p className="text-[9px] font-bold tracking-widest" style={{ color: 'rgba(255,255,255,0.3)' }}>TERRITORIES</p>
+        <div className="absolute bottom-14 right-3 flex flex-col gap-1 pointer-events-auto max-w-[180px]">
+          <p className="text-[9px] font-bold uppercase tracking-widest px-1 mb-0.5"
+            style={{ color: 'rgba(255,255,255,0.3)' }}>Saved Territories</p>
           {territories.map(t => (
             <div key={t.id} className="flex items-center gap-1">
               <button onClick={() => loadTerritory(t)}
-                className="flex-1 text-left text-[10px] font-semibold px-2.5 py-1 rounded-lg truncate"
-                style={{ backgroundColor: 'rgba(10,31,68,0.85)', color: 'rgba(255,255,255,0.7)', border: '1px solid rgba(255,255,255,0.12)', backdropFilter: 'blur(8px)' }}>
+                className="flex-1 text-[10px] font-semibold px-2 py-1 rounded-lg text-left truncate transition-all"
+                style={{ backgroundColor: 'rgba(10,31,68,0.9)', color: 'rgba(255,255,255,0.7)', border: '1px solid rgba(255,255,255,0.12)', backdropFilter: 'blur(8px)' }}>
                 📍 {t.name}
               </button>
               <button onClick={() => deleteTerritory(t.id)}
                 className="text-[10px] px-1.5 py-1 rounded-lg"
-                style={{ backgroundColor: 'rgba(10,31,68,0.85)', color: 'rgba(255,255,255,0.3)', border: '1px solid rgba(255,255,255,0.1)', backdropFilter: 'blur(8px)' }}>
+                style={{ backgroundColor: 'rgba(10,31,68,0.9)', color: 'rgba(255,255,255,0.3)', backdropFilter: 'blur(8px)' }}>
                 ✕
               </button>
             </div>
