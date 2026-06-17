@@ -12,17 +12,20 @@
  * Query params:
  *  ?force=true  — re-enrich even if already enriched
  */
+import { serviceClient } from '@/lib/supabase-service'
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { createClient as createServiceClient } from '@supabase/supabase-js'
 import { enrichFromMiamiDadePA, findFolioByAddressGIS } from '@/lib/enrichment/miami-dade-pa'
+import {
+  shouldRefreshModule,
+  snapshotBeforeUpdate,
+  markModuleRefreshed,
+  accumulateMarketData,
+} from '@/lib/propertyService'
 
 export const dynamic = 'force-dynamic'
 
-const service = createServiceClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+const service = serviceClient
 
 export async function POST(
   req: NextRequest,
@@ -53,9 +56,12 @@ export async function POST(
     }, { status: 422 })
   }
 
-  // Skip if already enriched (unless forced)
-  if (!force && property.enriched_at && property.enrichment_src === 'miami-dade-pa') {
-    return NextResponse.json({ skipped: true, enriched_at: property.enriched_at, message: 'Already enriched.' })
+  // Skip if module is still fresh (uses property_freshness TTL, falls back to enriched_at check)
+  if (!force) {
+    const needsRefresh = await shouldRefreshModule(id, 'ownership')
+    if (!needsRefresh) {
+      return NextResponse.json({ skipped: true, enriched_at: property.enriched_at, message: 'Data is fresh — skipped PA call.' })
+    }
   }
 
   // ── Resolve folio ──────────────────────────────────────────────────────────
@@ -91,6 +97,10 @@ export async function POST(
   if (!result) {
     return NextResponse.json({ error: 'PA API returned no data for this folio.', folio }, { status: 404 })
   }
+
+  // Snapshot current ownership/valuation values before overwriting
+  await snapshotBeforeUpdate(id, 'ownership', 'miami-dade-pa')
+  await snapshotBeforeUpdate(id, 'valuation', 'miami-dade-pa')
 
   // ── Update properties table ────────────────────────────────────────────────
   const update: Record<string, unknown> = {
@@ -143,12 +153,28 @@ export async function POST(
       { onConflict: 'lead_id,source' }
     )
 
+  // Mark modules as refreshed in the intelligence layer
+  await Promise.all([
+    markModuleRefreshed(id, 'ownership', 'miami-dade-pa'),
+    markModuleRefreshed(id, 'valuation', 'miami-dade-pa'),
+  ]).catch(() => {})
+
   // Return updated property
   const { data: updated } = await service
     .from('properties')
     .select('*')
     .eq('id', id)
     .single()
+
+  // Accumulate market intelligence (fire-and-forget)
+  accumulateMarketData({
+    zip:          updated?.zip,
+    city:         updated?.city,
+    county:       updated?.county,
+    market_value: updated?.market_value,
+    propertyId:   id,
+    source:       'miami-dade-pa',
+  })
 
   return NextResponse.json({
     ok: true,

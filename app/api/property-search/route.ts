@@ -15,6 +15,11 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { searchProperty, detectCounty } from '@/lib/enrichment/property-search'
 import type { County } from '@/lib/enrichment/types'
+import {
+  ensurePropertyRecord,
+  recordPropertySearch,
+  accumulateMarketData,
+} from '@/lib/propertyService'
 
 export const dynamic = 'force-dynamic'
 
@@ -46,6 +51,22 @@ export async function GET(req: NextRequest) {
         tip:     'Try including the city or zip code in the address',
       }, { status: 404 })
     }
+
+    // Build intelligence record and record the search — fire-and-forget.
+    // Never blocks the response. Never creates a Lead or CRM record.
+    ensurePropertyRecord(result).then(propertyId => {
+      if (propertyId) {
+        recordPropertySearch(propertyId)
+        accumulateMarketData({
+          zip:          result.zip,
+          city:         result.city,
+          county:       result.county,
+          market_value: result.market_value,
+          propertyId,
+          source:       result.source,
+        })
+      }
+    }).catch(() => {})
 
     return NextResponse.json({ result, query })
 

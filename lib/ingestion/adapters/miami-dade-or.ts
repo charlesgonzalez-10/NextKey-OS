@@ -54,10 +54,14 @@ const FIELD_MAP = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function yesterdayISO(): string {
+/** Returns YYYY-MM-DD for the last business day (Mon–Fri) */
+function lastBusinessDayISO(): string {
   const d = new Date()
-  d.setDate(d.getDate() - 1)
-  return d.toISOString().slice(0, 10)   // YYYY-MM-DD
+  d.setDate(d.getDate() - 1)           // start at yesterday
+  const dow = d.getDay()               // 0=Sun, 6=Sat
+  if (dow === 0) d.setDate(d.getDate() - 2)  // Sunday  → back to Friday
+  if (dow === 6) d.setDate(d.getDate() - 1)  // Saturday → back to Friday
+  return d.toISOString().slice(0, 10)
 }
 
 /**
@@ -153,7 +157,7 @@ export class MiamiDadeORAdapter implements CountyAdapter {
   }
 
   private async _fetch(): Promise<AdapterResult> {
-    const yesterday = yesterdayISO()
+    const yesterday = lastBusinessDayISO()
     const source    = `MD-Clerk-API:${yesterday}`
 
     let key: string

@@ -1,18 +1,19 @@
 'use client'
 
 /**
- * Property Search — Step 1: Criteria Builder
+ * Property Search
  *
- * Two-panel layout:
- *   Left  (400px) — search bar, mode toggle, acquisition criteria, saved specs
- *   Right (flex-1) — interactive map (Search Mode: static reference map,
- *                     Draw Zone Mode: drawing tools + territory management)
+ * One page, two ways to work:
+ *   1. Type an address/folio/owner → "Look Up" button appears →
+ *      instantly shows that property's full detail card inline
+ *   2. Build acquisition criteria → "Run Search" → bulk distress list
  *
- * After clicking Run Search → navigates to /property-search/results with
- * criteria serialised as URL search params.
+ * Both live on the same screen. No tabs, no separate pages.
  */
 
 import { useState, useCallback, useEffect, useRef, lazy, Suspense } from 'react'
+import type { PropertySearchResult } from '@/lib/enrichment/types'
+import type { CompsResult } from '@/lib/mls/beaches-mls'
 import { useRouter } from 'next/navigation'
 import PropertySearchPanel, {
   CriteriaState,
@@ -23,6 +24,311 @@ import type { DrawnZone } from '@/components/AcquisitionMap'
 
 // Lazy-load the map so it doesn't block initial paint
 const AcquisitionMap = lazy(() => import('@/components/AcquisitionMap'))
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function fmt$(n: number | null | undefined): string {
+  if (n == null) return '—'
+  return n >= 1_000_000
+    ? `$${(n / 1_000_000).toFixed(2)}M`
+    : `$${n.toLocaleString()}`
+}
+
+function fmtSqft(n: number | null | undefined): string {
+  if (n == null) return '—'
+  return `${n.toLocaleString()} sf`
+}
+
+function fmtDate(s: string | null | undefined): string {
+  if (!s) return '—'
+  try { return new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) }
+  catch { return s }
+}
+
+// ─── InlineComps ─────────────────────────────────────────────────────────────
+
+function InlineComps({ comps }: { comps: CompsResult }) {
+  const { sold, active, pending, median_sold_price, avg_price_per_sqft } = comps
+  const total = sold.length + active.length + pending.length
+
+  if (total === 0) {
+    return (
+      <div className="px-4 py-3 text-center">
+        <p className="text-[11px]" style={{ color: 'var(--c-text-3)' }}>No comps found within ½ mile</p>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      {/* Stats row */}
+      {(median_sold_price || avg_price_per_sqft) && (
+        <div className="grid grid-cols-3 divide-x" style={{ borderBottom: '1px solid var(--c-border)', '--tw-divide-opacity': '1' } as React.CSSProperties}>
+          {[
+            { label: 'Median Sold',  value: median_sold_price   ? fmt$(median_sold_price)              : '—' },
+            { label: 'Avg $/sqft',   value: avg_price_per_sqft  ? `$${avg_price_per_sqft}/sf`          : '—' },
+            { label: 'Comps Found',  value: `${sold.length}s / ${active.length}a` },
+          ].map(({ label, value }) => (
+            <div key={label} className="flex flex-col items-center py-2.5 px-1"
+              style={{ borderRight: '1px solid var(--c-border)' }}>
+              <span className="text-[8px] font-bold uppercase tracking-widest mb-0.5" style={{ color: 'var(--c-text-3)' }}>{label}</span>
+              <span className="text-[11px] font-bold" style={{ color: value === '—' ? 'var(--c-text-3)' : '#4CAF9A' }}>{value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Top 3 sold comps */}
+      {sold.length > 0 && (
+        <div className="px-3 py-2" style={{ borderBottom: active.length > 0 ? '1px solid var(--c-border)' : undefined }}>
+          <p className="text-[8px] font-bold uppercase tracking-widest mb-1.5" style={{ color: '#4CAF9A' }}>
+            Sold ({sold.length})
+          </p>
+          <div className="space-y-1.5">
+            {sold.slice(0, 3).map((c, i) => (
+              <div key={c.mls_number ?? i} className="flex items-center justify-between">
+                <div className="min-w-0 flex-1 pr-2">
+                  <p className="text-[10px] font-semibold truncate" style={{ color: 'var(--c-primary)' }}>{c.address}</p>
+                  <p className="text-[9px]" style={{ color: 'var(--c-text-3)' }}>
+                    {[c.beds && `${c.beds}bd`, c.baths && `${c.baths}ba`, c.living_area && `${c.living_area.toLocaleString()}sf`].filter(Boolean).join(' · ')}
+                    {c.sold_date ? ` · ${new Date(c.sold_date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}` : ''}
+                    {c.distance_miles ? ` · ${c.distance_miles}mi` : ''}
+                  </p>
+                </div>
+                <div className="text-right shrink-0">
+                  <p className="text-[11px] font-bold" style={{ color: '#4CAF9A' }}>{fmt$(c.sold_price)}</p>
+                  {c.price_per_sqft && <p className="text-[9px]" style={{ color: 'var(--c-text-3)' }}>${c.price_per_sqft}/sf</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Top 3 active listings */}
+      {active.length > 0 && (
+        <div className="px-3 py-2">
+          <p className="text-[8px] font-bold uppercase tracking-widest mb-1.5" style={{ color: '#C9A84C' }}>
+            Active ({active.length})
+          </p>
+          <div className="space-y-1.5">
+            {active.slice(0, 3).map((c, i) => (
+              <div key={c.mls_number ?? i} className="flex items-center justify-between">
+                <div className="min-w-0 flex-1 pr-2">
+                  <p className="text-[10px] font-semibold truncate" style={{ color: 'var(--c-primary)' }}>{c.address}</p>
+                  <p className="text-[9px]" style={{ color: 'var(--c-text-3)' }}>
+                    {[c.beds && `${c.beds}bd`, c.baths && `${c.baths}ba`, c.living_area && `${c.living_area.toLocaleString()}sf`].filter(Boolean).join(' · ')}
+                    {c.days_on_market ? ` · ${c.days_on_market}d on market` : ''}
+                    {c.distance_miles ? ` · ${c.distance_miles}mi` : ''}
+                  </p>
+                </div>
+                <p className="text-[11px] font-bold shrink-0" style={{ color: '#C9A84C' }}>{fmt$(c.list_price)}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── LookupResultCard ─────────────────────────────────────────────────────────
+
+function LookupResultCard({
+  result,
+  saved,
+  onSave,
+  onClear,
+}: {
+  result:   PropertySearchResult
+  saved:    boolean
+  onSave:   () => void
+  onClear:  () => void
+}) {
+  const d = result.distress
+
+  // Distress flag list
+  const flags: string[] = []
+  if (d?.foreclosure_type === 'P') flags.push('Pre-Foreclosure')
+  if (d?.foreclosure_type === 'F') flags.push('Foreclosure')
+  if (d?.foreclosure_type === 'A') flags.push('Auction')
+
+  // Source badge colour
+  const srcColor =
+    result.source_type === 'paid'     ? '#4CAF9A' :
+    result.source_type === 'internal' ? '#6B9FD4' :
+    '#C9A84C'
+
+  // Google Maps link
+  const gmaps = `https://www.google.com/maps/search/${encodeURIComponent(
+    [result.property_address, result.city, result.state, result.zip].filter(Boolean).join(', ')
+  )}`
+
+  return (
+    <div>
+      {/* Card header */}
+      <div className="flex items-start justify-between px-4 pt-4 pb-2">
+        <div className="flex-1 min-w-0 pr-2">
+          <p className="text-[13px] font-bold leading-tight" style={{ color: 'var(--c-primary)' }}>
+            {result.property_address}
+          </p>
+          <p className="text-[11px] mt-0.5" style={{ color: 'var(--c-text-3)' }}>
+            {[result.city, result.state, result.zip].filter(Boolean).join(', ')}
+          </p>
+        </div>
+        <button onClick={onClear} className="shrink-0 mt-0.5 hover:opacity-60 text-xs px-1.5 py-0.5 rounded-lg"
+          style={{ color: 'var(--c-text-3)', backgroundColor: 'var(--c-hover)' }}>✕</button>
+      </div>
+
+      {/* Source + distress flags */}
+      <div className="flex flex-wrap items-center gap-1.5 px-4 pb-2.5">
+        {result.source_display && (
+          <span className="text-[9px] font-bold px-2 py-0.5 rounded-full"
+            style={{ backgroundColor: `${srcColor}18`, color: srcColor, border: `1px solid ${srcColor}40` }}>
+            {result.source_display}
+          </span>
+        )}
+        {result.absentee_owner && (
+          <span className="text-[9px] font-bold px-2 py-0.5 rounded-full"
+            style={{ backgroundColor: 'rgba(201,168,76,0.12)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.3)' }}>
+            Absentee Owner
+          </span>
+        )}
+        {flags.map(f => (
+          <span key={f} className="text-[9px] font-bold px-2 py-0.5 rounded-full"
+            style={{ backgroundColor: 'rgba(231,76,60,0.12)', color: '#E74C3C', border: '1px solid rgba(231,76,60,0.3)' }}>
+            🔴 {f}
+          </span>
+        ))}
+      </div>
+
+      <div style={{ borderTop: '1px solid var(--c-border)' }} />
+
+      {/* Owner block */}
+      {result.owner_name && (
+        <div className="px-4 py-2.5" style={{ borderBottom: '1px solid var(--c-border)' }}>
+          <p className="text-[9px] font-bold uppercase tracking-widest mb-0.5" style={{ color: 'var(--c-text-3)' }}>Owner</p>
+          <p className="text-[11px] font-semibold" style={{ color: 'var(--c-primary)' }}>{result.owner_name}</p>
+          {result.mailing_address && result.mailing_address !== result.property_address && (
+            <p className="text-[10px] mt-0.5" style={{ color: 'var(--c-text-3)' }}>
+              ✉ {result.mailing_address}{result.owner_city ? `, ${result.owner_city}` : ''}{result.owner_state ? `, ${result.owner_state}` : ''}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Property stats grid */}
+      <div className="grid grid-cols-4 gap-0" style={{ borderBottom: '1px solid var(--c-border)' }}>
+        {[
+          { label: 'Beds',    value: result.beds   ?? '—' },
+          { label: 'Baths',   value: result.baths  ?? '—' },
+          { label: 'Living',  value: fmtSqft(result.living_area) },
+          { label: 'Built',   value: result.year_built ?? '—' },
+        ].map(({ label, value }) => (
+          <div key={label} className="flex flex-col items-center py-2.5 px-1"
+            style={{ borderRight: '1px solid var(--c-border)' }}>
+            <span className="text-[8px] font-bold uppercase tracking-widest mb-0.5" style={{ color: 'var(--c-text-3)' }}>{label}</span>
+            <span className="text-[12px] font-bold" style={{ color: 'var(--c-primary)' }}>{String(value)}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Valuations */}
+      <div className="grid grid-cols-3 gap-0" style={{ borderBottom: '1px solid var(--c-border)' }}>
+        {[
+          { label: 'Market',   value: fmt$(result.market_value) },
+          { label: 'Assessed', value: fmt$(result.assessed_value) },
+          { label: 'Land',     value: fmt$(result.land_value) },
+        ].map(({ label, value }) => (
+          <div key={label} className="flex flex-col items-center py-2.5 px-1"
+            style={{ borderRight: '1px solid var(--c-border)' }}>
+            <span className="text-[8px] font-bold uppercase tracking-widest mb-0.5" style={{ color: 'var(--c-text-3)' }}>{label}</span>
+            <span className="text-[11px] font-bold" style={{ color: value === '—' ? 'var(--c-text-3)' : '#C9A84C' }}>{value}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Last sale */}
+      {(result.last_sale_date || result.last_sale_amount) && (
+        <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '1px solid var(--c-border)' }}>
+          <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: 'var(--c-text-3)' }}>Last Sale</span>
+          <span className="text-[11px] font-semibold" style={{ color: 'var(--c-primary)' }}>
+            {fmtDate(result.last_sale_date)}{result.last_sale_amount ? ` · ${fmt$(result.last_sale_amount)}` : ''}
+          </span>
+        </div>
+      )}
+
+      {/* Distress detail */}
+      {d && (d.case_number || d.file_date || d.plaintiff || d.lender_name) && (
+        <div className="px-4 py-2.5" style={{ borderBottom: '1px solid var(--c-border)', backgroundColor: 'rgba(231,76,60,0.04)' }}>
+          <p className="text-[9px] font-bold uppercase tracking-widest mb-1.5" style={{ color: '#E74C3C' }}>Distress Record</p>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+            {d.case_number && (
+              <div>
+                <p className="text-[8px] uppercase tracking-widest" style={{ color: 'var(--c-text-3)' }}>Case #</p>
+                <p className="text-[10px] font-mono font-semibold" style={{ color: 'var(--c-primary)' }}>{d.case_number}</p>
+              </div>
+            )}
+            {d.file_date && (
+              <div>
+                <p className="text-[8px] uppercase tracking-widest" style={{ color: 'var(--c-text-3)' }}>Filed</p>
+                <p className="text-[10px] font-semibold" style={{ color: 'var(--c-primary)' }}>{fmtDate(d.file_date)}</p>
+              </div>
+            )}
+            {(d.plaintiff || d.lender_name) && (
+              <div className="col-span-2">
+                <p className="text-[8px] uppercase tracking-widest" style={{ color: 'var(--c-text-3)' }}>Plaintiff / Lender</p>
+                <p className="text-[10px] font-semibold" style={{ color: 'var(--c-primary)' }}>{d.plaintiff ?? d.lender_name}</p>
+              </div>
+            )}
+            {d.lien_amount && (
+              <div>
+                <p className="text-[8px] uppercase tracking-widest" style={{ color: 'var(--c-text-3)' }}>Lien Amount</p>
+                <p className="text-[10px] font-bold" style={{ color: '#E74C3C' }}>{fmt$(d.lien_amount)}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Folio */}
+      {result.folio && (
+        <div className="flex items-center justify-between px-4 py-2" style={{ borderBottom: '1px solid var(--c-border)' }}>
+          <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: 'var(--c-text-3)' }}>Folio / APN</span>
+          <span className="text-[10px] font-mono" style={{ color: 'var(--c-text-2)' }}>{result.folio}</span>
+        </div>
+      )}
+
+      {/* Action buttons */}
+      <div className="flex gap-2 px-4 py-3">
+        <button
+          onClick={onSave}
+          disabled={saved}
+          className="flex-1 py-2 text-[11px] font-bold rounded-xl transition-all flex items-center justify-center gap-1.5"
+          style={{
+            backgroundColor: saved ? 'rgba(76,175,154,0.12)' : 'var(--c-primary)',
+            color:            saved ? '#4CAF9A'               : '#C9A84C',
+            border:           saved ? '1px solid rgba(76,175,154,0.3)' : 'none',
+            opacity:          saved ? 1 : undefined,
+          }}>
+          {saved ? '✓ Saved to Leads' : '＋ Save to Leads'}
+        </button>
+        {result.pa_url && (
+          <a href={result.pa_url} target="_blank" rel="noopener noreferrer"
+            className="py-2 px-3 text-[11px] font-bold rounded-xl flex items-center gap-1 hover:opacity-80 transition-all"
+            style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+            🏛 PA
+          </a>
+        )}
+        <a href={gmaps} target="_blank" rel="noopener noreferrer"
+          className="py-2 px-3 text-[11px] font-bold rounded-xl flex items-center gap-1 hover:opacity-80 transition-all"
+          style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+          📍 Map
+        </a>
+      </div>
+    </div>
+  )
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -72,6 +378,17 @@ export default function PropertySearchClient() {
 
   // Draw zone
   const [drawnZone, setDrawnZone] = useState<DrawnZone | null>(null)
+
+  // Quick Lookup state (uses the existing searchInput as the query)
+  const [lookupResult,  setLookupResult]  = useState<PropertySearchResult | null>(null)
+  const [lookupLoading, setLookupLoading] = useState(false)
+  const [lookupError,   setLookupError]   = useState<string | null>(null)
+  const [lookupSaved,   setLookupSaved]   = useState(false)
+
+  // MLS comps auto-fetched after a successful lookup
+  const [lookupComps,        setLookupComps]        = useState<CompsResult | null>(null)
+  const [lookupCompsLoading, setLookupCompsLoading] = useState(false)
+  const [lookupCompsError,   setLookupCompsError]   = useState<string | null>(null)
 
   // Saved searches
   const [savedSearches, setSavedSearches]   = useState<SavedSearch[]>([])
@@ -154,6 +471,92 @@ export default function PropertySearchClient() {
       setSaveName('')
     }
   }
+
+  // ── Quick Lookup ──────────────────────────────────────────────────────────
+
+  const runLookup = useCallback(async () => {
+    const q = searchInput.trim()
+    if (!q) return
+    setLookupLoading(true)
+    setLookupError(null)
+    setLookupResult(null)
+    setLookupSaved(false)
+    setLookupComps(null)
+    setLookupCompsError(null)
+    try {
+      const res  = await fetch(`/api/property-search?q=${encodeURIComponent(q)}`)
+      const data = await res.json()
+      if (!res.ok) {
+        setLookupError(data.error ?? 'Property not found')
+      } else {
+        const result: PropertySearchResult = data.result
+        setLookupResult(result)
+        // Auto-fetch comps in background (don't await — non-blocking)
+        const addrFull = [result.property_address, result.city, result.state, result.zip].filter(Boolean).join(', ')
+        setLookupCompsLoading(true)
+        fetch(
+          `/api/mls/comps?address=${encodeURIComponent(addrFull)}` +
+          (result.beds  ? `&beds=${result.beds}`        : '') +
+          (result.living_area ? `&sqft=${result.living_area}` : '')
+        )
+          .then(r => r.json())
+          .then(d => {
+            if (d.error) setLookupCompsError(d.code === 'NO_CREDENTIALS' ? null : d.error)
+            else setLookupComps(d as CompsResult)
+          })
+          .catch(() => {})
+          .finally(() => setLookupCompsLoading(false))
+      }
+    } catch {
+      setLookupError('Network error — please try again')
+    } finally {
+      setLookupLoading(false)
+    }
+  }, [searchInput])
+
+  const saveLookupToLeads = useCallback(async () => {
+    if (!lookupResult) return
+    // Map PropertySearchResult → the shape /api/properties/save expects
+    const property = {
+      county:           lookupResult.county,
+      property_address: lookupResult.property_address,
+      city:             lookupResult.city,
+      state:            lookupResult.state,
+      zip:              lookupResult.zip,
+      folio_number:     lookupResult.folio,
+      owner_name:       lookupResult.owner_name,
+      mailing_address:  lookupResult.mailing_address,
+      owner_city:       lookupResult.owner_city,
+      owner_state:      lookupResult.owner_state,
+      owner_zip:        lookupResult.owner_zip,
+      absentee_owner:   lookupResult.absentee_owner,
+      beds:             lookupResult.beds,
+      baths:            lookupResult.baths,
+      living_area:      lookupResult.living_area,
+      year_built:       lookupResult.year_built,
+      market_value:     lookupResult.market_value,
+      assessed_value:   lookupResult.assessed_value,
+      land_value:       lookupResult.land_value,
+      data_source:      lookupResult.source_display ?? lookupResult.source,
+      source:           lookupResult.source_type === 'public' ? 'county_pa' : 'reapi',
+      case_number:      lookupResult.distress?.case_number ?? null,
+      file_date:        lookupResult.distress?.file_date ?? null,
+      plaintiff:        lookupResult.distress?.plaintiff ?? null,
+      lender_name:      lookupResult.distress?.lender_name ?? null,
+      is_pre_foreclosure: lookupResult.distress?.foreclosure_type === 'P',
+      is_foreclosure:     lookupResult.distress?.foreclosure_type === 'F',
+      is_auction:         lookupResult.distress?.foreclosure_type === 'A',
+      equity_percentage:  null,
+      equity_tier:        null,
+      folio_number_raw:   lookupResult.folio,
+    }
+    const res = await fetch('/api/properties/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ property }),
+    })
+    if (res.ok) setLookupSaved(true)
+  }, [lookupResult])
 
   const hasAnyCriteria = activeCount > 0 || searchInput.trim().length > 0 || drawnZone !== null
 
@@ -289,6 +692,69 @@ export default function PropertySearchClient() {
             )}
           </div>
 
+          {/* ── Quick Lookup result card ──────────────────────────────── */}
+          {(lookupResult || lookupError) && (
+            <div className="mx-4 my-3 rounded-2xl overflow-hidden"
+              style={{ border: '1px solid var(--c-border)', backgroundColor: 'var(--c-card)' }}>
+
+              {lookupError ? (
+                <div className="p-4 text-center">
+                  <p className="text-2xl mb-2">🏚️</p>
+                  <p className="text-sm font-bold mb-1" style={{ color: 'var(--c-primary)' }}>Not Found</p>
+                  <p className="text-[11px]" style={{ color: 'var(--c-text-3)' }}>{lookupError}</p>
+                  <p className="text-[10px] mt-2" style={{ color: 'var(--c-text-3)' }}>
+                    Try adding city or ZIP • Check spelling • Use folio # for exact match
+                  </p>
+                </div>
+              ) : lookupResult ? (
+                <LookupResultCard
+                  result={lookupResult}
+                  saved={lookupSaved}
+                  onSave={saveLookupToLeads}
+                  onClear={() => {
+                    setLookupResult(null); setLookupError(null); setLookupSaved(false)
+                    setLookupComps(null); setLookupCompsError(null)
+                  }}
+                />
+              ) : null}
+            </div>
+          )}
+
+          {/* MLS Comps — shown below the lookup card */}
+          {lookupResult && (lookupCompsLoading || lookupComps || lookupCompsError) && (
+            <div className="mx-4 mb-3 rounded-2xl overflow-hidden"
+              style={{ border: '1px solid var(--c-border)', backgroundColor: 'var(--c-card)' }}>
+              <div className="flex items-center justify-between px-4 py-2.5"
+                style={{ borderBottom: '1px solid var(--c-border)', backgroundColor: 'var(--c-card-alt)' }}>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: 'var(--c-text-3)' }}>
+                    Comps · ½ mi radius
+                  </span>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold"
+                    style={{ backgroundColor: 'rgba(76,175,154,0.12)', color: '#4CAF9A', border: '1px solid rgba(76,175,154,0.25)' }}>
+                    {lookupComps?.source === 'rentcast' ? 'Rentcast' : 'Beaches MLS'}
+                  </span>
+                </div>
+                {lookupCompsLoading && (
+                  <div className="w-3 h-3 border-2 border-t-transparent rounded-full animate-spin"
+                    style={{ borderColor: '#C9A84C', borderTopColor: 'transparent' }} />
+                )}
+              </div>
+
+              {lookupCompsLoading && !lookupComps ? (
+                <div className="px-4 py-3 text-center">
+                  <p className="text-[11px]" style={{ color: 'var(--c-text-3)' }}>Pulling comps…</p>
+                </div>
+              ) : lookupCompsError ? (
+                <div className="px-4 py-3">
+                  <p className="text-[11px]" style={{ color: '#E74C3C' }}>{lookupCompsError}</p>
+                </div>
+              ) : lookupComps ? (
+                <InlineComps comps={lookupComps} />
+              ) : null}
+            </div>
+          )}
+
           {/* Saved specs */}
           <div className="px-5 py-4" style={{ borderBottom: '1px solid var(--c-border)' }}>
             <div className="flex items-center justify-between mb-2.5">
@@ -331,9 +797,22 @@ export default function PropertySearchClient() {
           <div className="h-32" />
         </div>
 
-        {/* Sticky footer — Run Search */}
+        {/* Sticky footer — Look Up + Run Search */}
         <div className="p-4 flex flex-col gap-2"
           style={{ borderTop: '1px solid var(--c-border)', backgroundColor: 'var(--c-card)' }}>
+
+          {/* Look Up This Property — appears when there's text in the search box */}
+          {searchInput.trim() && (
+            <button onClick={runLookup} disabled={lookupLoading}
+              className="w-full py-2.5 text-sm font-bold rounded-xl transition-all hover:opacity-90 flex items-center justify-center gap-2"
+              style={{ backgroundColor: 'rgba(201,168,76,0.15)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.4)' }}>
+              {lookupLoading
+                ? <><div className="w-3.5 h-3.5 border-2 border-t-transparent rounded-full animate-spin" style={{ borderColor: '#C9A84C', borderTopColor: 'transparent' }} /> Looking up…</>
+                : <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z" /></svg>Look Up This Property</>
+              }
+            </button>
+          )}
+
           {hasAnyCriteria && (
             <button onClick={clearAll}
               className="w-full py-2 text-xs font-semibold rounded-xl transition-all hover:opacity-80"
@@ -347,7 +826,7 @@ export default function PropertySearchClient() {
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11A6 6 0 105 11a6 6 0 0012 0z" />
             </svg>
-            {hasAnyCriteria ? `Run Search${activeCount > 0 ? ` · ${activeCount} criteria` : ''}` : 'Run Search'}
+            {hasAnyCriteria ? `Run Bulk Search${activeCount > 0 ? ` · ${activeCount} criteria` : ''}` : 'Run Bulk Search'}
           </button>
         </div>
       </div>

@@ -2,6 +2,7 @@ import { Suspense } from 'react'
 import DashboardLayout from '@/app/layout-dashboard'
 import SearchResultsClient from './results-client'
 
+export const dynamic = 'force-dynamic'
 export const metadata = { title: 'Search Results — NextKey OS' }
 
 export default function SearchResultsPage() {

@@ -1,8 +1,9 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import type { PropertySearchResult } from '@/lib/enrichment/types'
+import PropertyMapCard from '@/components/PropertyMapCard'
 
 // ─── Helpers (identical to lead-detail-client) ────────────────────────────────
 
@@ -44,56 +45,7 @@ function InfoRow({ label, value }: { label: string; value?: React.ReactNode }) {
   )
 }
 
-// ─── PropertyMedia — same as lead detail ──────────────────────────────────────
-
-function PropertyMedia({ address, city, zip }: { address: string; city?: string; zip?: string }) {
-  const [streetViewOk, setStreetViewOk] = useState(true)
-  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
-
-  const fullAddress = [address, city, zip ? `FL ${zip}` : 'FL'].filter(Boolean).join(', ')
-  const encoded = encodeURIComponent(fullAddress)
-
-  if (!apiKey) return null
-
-  return (
-    <div className="rounded-2xl overflow-hidden" style={{ border: '1px solid var(--c-border)' }}>
-      {streetViewOk ? (
-        <div className="relative w-full" style={{ height: 220 }}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={`https://maps.googleapis.com/maps/api/streetview?size=900x440&location=${encoded}&fov=90&pitch=5&key=${apiKey}`}
-            alt={`Street view of ${address}`}
-            className="w-full h-full object-cover"
-            onError={() => setStreetViewOk(false)}
-          />
-          <div className="absolute bottom-0 left-0 right-0 px-3 py-2"
-            style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.5), transparent)' }}>
-            <p className="text-white text-xs font-semibold">{address}</p>
-            <p className="text-white/60 text-[11px]">{city}{zip ? `, FL ${zip}` : ''}</p>
-          </div>
-          <a href={`https://www.google.com/maps/search/?api=1&query=${encoded}`}
-            target="_blank" rel="noopener noreferrer"
-            className="absolute top-2 right-2 text-[10px] font-semibold px-2 py-1 rounded-lg"
-            style={{ backgroundColor: 'rgba(0,0,0,0.5)', color: 'rgba(255,255,255,0.8)' }}>
-            Open in Maps ↗
-          </a>
-        </div>
-      ) : (
-        <div className="flex items-center justify-center h-24 text-sm"
-          style={{ backgroundColor: 'var(--c-card-alt)', color: 'var(--c-text-3)' }}>
-          Street view not available
-        </div>
-      )}
-      <div style={{ height: 200 }}>
-        <iframe title="Property location" width="100%" height="200"
-          style={{ border: 'none', display: 'block' }} loading="lazy"
-          referrerPolicy="no-referrer-when-downgrade"
-          src={`https://www.google.com/maps/embed/v1/place?key=${apiKey}&q=${encoded}&zoom=16`}
-        />
-      </div>
-    </div>
-  )
-}
+// PropertyMedia replaced by shared PropertyMapCard component
 
 // ─── Sales history table ──────────────────────────────────────────────────────
 
@@ -129,7 +81,7 @@ function extractSalesHistory(raw: Record<string, any> | undefined) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type TabKey = 'overview' | 'ownership' | 'financials' | 'history' | 'comps'
+type TabKey = 'overview' | 'ownership' | 'financials' | 'history' | 'comps' | 'case'
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'overview',   label: 'Overview' },
@@ -137,6 +89,7 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'financials', label: 'Financials' },
   { key: 'history',    label: 'Sale History' },
   { key: 'comps',      label: 'Comps' },
+  { key: 'case',       label: 'Case Details' },
 ]
 
 const COUNTY_LABELS: Record<string, string> = {
@@ -151,6 +104,81 @@ const EQUITY_COLORS: Record<string, string> = {
   None:   '#9ca3af',
 }
 
+// ─── Inline case-number editor ────────────────────────────────────────────────
+
+function CaseNumberEdit({
+  propertyId,
+  initialValue,
+}: {
+  propertyId: string
+  initialValue: string | null
+}) {
+  const [editing, setEditing]   = useState(false)
+  const [value,   setValue]     = useState(initialValue ?? '')
+  const [saved,   setSaved]     = useState(initialValue ?? '')
+  const [saving,  setSaving]    = useState(false)
+  const [error,   setError]     = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => { setValue(initialValue ?? ''); setSaved(initialValue ?? '') }, [initialValue])
+
+  const save = async () => {
+    const trimmed = value.trim()
+    if (!trimmed) return
+    setSaving(true); setError('')
+    try {
+      const res = await fetch(`/api/properties/${propertyId}/case-number`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ case_number: trimmed }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setSaved(trimmed); setEditing(false)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Save failed')
+    } finally { setSaving(false) }
+  }
+
+  const hasValue = Boolean(saved)
+
+  return (
+    <div className="flex items-center justify-between py-2" style={{ borderBottom: '1px solid var(--c-border)' }}>
+      <span className="text-xs shrink-0 w-36 pt-0.5" style={{ color: 'var(--c-text-2)' }}>Case Number</span>
+      {editing ? (
+        <div className="flex items-center gap-2">
+          <input ref={inputRef} type="text" value={value}
+            onChange={e => setValue(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') { setEditing(false); setValue(saved) } }}
+            placeholder="e.g. CACE-25-012345"
+            className="text-xs rounded-lg px-2 py-1 w-44"
+            style={{ backgroundColor: 'rgba(255,255,255,0.06)', border: `1px solid ${error ? '#ef4444' : 'var(--c-border)'}`, color: 'var(--c-primary)', outline: 'none' }} />
+          <button onClick={save} disabled={saving}
+            className="text-xs px-2 py-1 rounded-lg"
+            style={{ backgroundColor: 'rgba(76,175,154,0.15)', color: '#4CAF9A', border: '1px solid rgba(76,175,154,0.3)' }}>
+            {saving ? '…' : '✓'}
+          </button>
+          <button onClick={() => { setEditing(false); setValue(saved) }}
+            className="text-xs px-2 py-1 rounded-lg"
+            style={{ backgroundColor: 'rgba(255,255,255,0.05)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+            ✕
+          </button>
+          {error && <span className="text-[10px]" style={{ color: '#ef4444' }}>{error}</span>}
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium"
+            style={{ color: hasValue ? 'var(--c-primary)' : 'rgba(255,255,255,0.25)', fontStyle: hasValue ? 'normal' : 'italic' }}>
+            {hasValue ? saved : 'Pending lookup'}
+          </span>
+          <button onClick={() => { setEditing(true); setTimeout(() => inputRef.current?.focus(), 50) }}
+            title="Edit case number" className="text-xs hover:opacity-80"
+            style={{ color: 'rgba(255,255,255,0.35)' }}>✎</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function PropertyDetailClient({
   query,
   property,
@@ -163,8 +191,33 @@ export default function PropertyDetailClient({
   const router = useRouter()
   const [lookupInput, setLookupInput] = useState(query)
   const [tab, setTab] = useState<TabKey>('overview')
+  const [currentProperty, setCurrentProperty] = useState<PropertySearchResult | null>(property)
+  const [deepEnriching, setDeepEnriching] = useState(false)
+  const [deepEnrichMsg, setDeepEnrichMsg] = useState('')
 
-  const p   = property
+  const deepEnrich = useCallback(async () => {
+    const propertyId = currentProperty?.distress?.lead_id
+    if (!propertyId) return
+    setDeepEnriching(true)
+    setDeepEnrichMsg('')
+    try {
+      const res = await fetch(`/api/properties/deep-enrich/${propertyId}`, { method: 'POST' })
+      const data = await res.json()
+      if (res.ok && data.result) {
+        setCurrentProperty(prev => prev ? { ...prev, ...data.result } : prev)
+        setDeepEnrichMsg(`Enriched — ${data.fields_updated?.length ?? 0} fields updated from RealEstateAPI`)
+      } else {
+        setDeepEnrichMsg(data.error ?? 'Deep enrich failed')
+      }
+    } catch {
+      setDeepEnrichMsg('Deep enrich request failed')
+    } finally {
+      setDeepEnriching(false)
+      setTimeout(() => setDeepEnrichMsg(''), 6000)
+    }
+  }, [currentProperty?.distress?.lead_id])
+
+  const p   = currentProperty
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const raw = p?.raw as Record<string, any> | undefined
   const sales = extractSalesHistory(raw)
@@ -343,9 +396,7 @@ export default function PropertyDetailClient({
           {/* ══ OVERVIEW ══ */}
           {tab === 'overview' && (
             <>
-              <PropertyMedia address={p.property_address} city={p.city} zip={p.zip} />
-
-              {/* Distress banner */}
+              {/* Distress banner — full width */}
               {p.distress && (
                 <div className="rounded-2xl px-5 py-4 flex items-center justify-between gap-4 flex-wrap"
                   style={{ backgroundColor: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)' }}>
@@ -371,27 +422,91 @@ export default function PropertyDetailClient({
                 </div>
               )}
 
-              {/* Property Details */}
-              <div className="rounded-2xl p-5" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-                <h3 className="text-sm font-bold uppercase tracking-wider mb-4" style={{ color: 'var(--c-text-2)' }}>Property Details</h3>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
-                  <Tile label="Beds"       value={p.beds ?? '—'} />
-                  <Tile label="Baths"      value={p.baths ?? '—'} />
-                  <Tile label="Sqft"       value={p.living_area ? p.living_area.toLocaleString() : '—'} sub="living area" />
-                  <Tile label="Year Built" value={p.year_built ?? '—'} />
-                  {p.lot_size    && <Tile label="Lot Size"   value={p.lot_size.toLocaleString()} sub="sqft" />}
-                  {p.stories     && <Tile label="Stories"    value={p.stories} />}
-                  {p.property_use && <Tile label="Type"      value={p.property_use} />}
-                  <Tile label="Occupancy"
-                    value={!p.absentee_owner ? 'Owner-Occupied' : raw?._vacant ? 'Vacant' : 'Absentee'}
-                    color={!p.absentee_owner ? '#4CAF9A' : raw?._vacant ? '#E07B6A' : '#C9A84C'} />
+              {/* Data Source badge row + Deep Enrich button */}
+              {p && (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl px-4 py-3"
+                  style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-semibold" style={{ color: 'var(--c-text-2)' }}>
+                      {p.source_display ?? (p.source === 'miami-dade-pa' ? 'Miami-Dade Property Appraiser'
+                        : p.source === 'reapi' ? 'RealEstateAPI.com'
+                        : p.source)}
+                    </span>
+                    {p.source_type && (
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                        style={{
+                          backgroundColor: p.source_type === 'public' ? 'rgba(76,175,154,0.15)' : 'rgba(107,189,224,0.15)',
+                          color:           p.source_type === 'public' ? '#4CAF9A' : '#6ABDE0',
+                        }}>
+                        {p.source_type === 'public' ? 'Public' : p.source_type === 'paid' ? 'Paid' : 'Internal'}
+                      </span>
+                    )}
+                    {p.source_confidence != null && (
+                      <span className="text-[10px]" style={{ color: 'var(--c-text-3)' }}>
+                        {p.source_confidence}% confidence
+                      </span>
+                    )}
+                    {p.source_checked_at && (
+                      <span className="text-[10px]" style={{ color: 'var(--c-text-3)' }}>
+                        · checked {new Date(p.source_checked_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
+                      </span>
+                    )}
+                  </div>
+                  {(p.source_type === 'public' || p.needs_enrichment) && p.distress?.lead_id && (
+                    <div className="flex items-center gap-2">
+                      {deepEnrichMsg && (
+                        <span className="text-[10px]"
+                          style={{ color: deepEnrichMsg.startsWith('Enriched') ? '#4CAF9A' : '#E07B6A' }}>
+                          {deepEnrichMsg}
+                        </span>
+                      )}
+                      <button
+                        onClick={deepEnrich}
+                        disabled={deepEnriching}
+                        className="text-xs font-bold px-3 py-1.5 rounded-lg transition-opacity hover:opacity-80 disabled:opacity-50"
+                        style={{ backgroundColor: 'rgba(107,189,224,0.15)', color: '#6ABDE0', border: '1px solid rgba(107,189,224,0.3)' }}>
+                        {deepEnriching ? '…' : 'Deep Enrich'}
+                      </button>
+                    </div>
+                  )}
                 </div>
-                <InfoRow label="Property Address" value={p.property_address} />
-                <InfoRow label="City / State / ZIP" value={[p.city, p.state, p.zip].filter(Boolean).join(', ')} />
-                <InfoRow label="County"      value={countyLabel} />
-                <InfoRow label="Subdivision" value={p.subdivision} />
-                <InfoRow label="Zoning"      value={p.zoning} />
-                <InfoRow label="Folio / APN" value={<span className="font-mono text-xs">{p.folio}</span>} />
+              )}
+
+              {/* Property Details + Map side-by-side */}
+              <div className="flex flex-col md:flex-row gap-5 items-start">
+                {/* Left: Property Details */}
+                <div className="flex-1 min-w-0 rounded-2xl p-5" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                  <h3 className="text-sm font-bold uppercase tracking-wider mb-4" style={{ color: 'var(--c-text-2)' }}>Property Details</h3>
+                  <div className="grid grid-cols-2 gap-3 mb-5">
+                    <Tile label="Beds"       value={p.beds ?? '—'} />
+                    <Tile label="Baths"      value={p.baths ?? '—'} />
+                    <Tile label="Sqft"       value={p.living_area ? p.living_area.toLocaleString() : '—'} sub="living area" />
+                    <Tile label="Year Built" value={p.year_built ?? '—'} />
+                    {p.lot_size    && <Tile label="Lot Size"   value={p.lot_size.toLocaleString()} sub="sqft" />}
+                    {p.stories     && <Tile label="Stories"    value={p.stories} />}
+                    {p.property_use && <Tile label="Type"      value={p.property_use} />}
+                    <Tile label="Occupancy"
+                      value={!p.absentee_owner ? 'Owner-Occupied' : raw?._vacant ? 'Vacant' : 'Absentee'}
+                      color={!p.absentee_owner ? '#4CAF9A' : raw?._vacant ? '#E07B6A' : '#C9A84C'} />
+                  </div>
+                  <InfoRow label="Property Address" value={p.property_address} />
+                  <InfoRow label="City / State / ZIP" value={[p.city, p.state, p.zip].filter(Boolean).join(', ')} />
+                  <InfoRow label="County"      value={countyLabel} />
+                  <InfoRow label="Subdivision" value={p.subdivision} />
+                  <InfoRow label="Zoning"      value={p.zoning} />
+                  <InfoRow label="Folio / APN" value={<span className="font-mono text-xs">{p.folio}</span>} />
+                </div>
+
+                {/* Right: Map Card */}
+                <div className="w-full md:w-72 shrink-0">
+                  <PropertyMapCard
+                    address={p.property_address}
+                    city={p.city}
+                    zip={p.zip}
+                    county={p.county}
+                    folio={p.folio}
+                  />
+                </div>
               </div>
 
               {/* Valuation */}
@@ -523,9 +638,67 @@ export default function PropertyDetailClient({
             </div>
           )}
 
+          {/* ══ CASE DETAILS ══ */}
+          {tab === 'case' && (
+            <div className="space-y-5">
+              {p.distress ? (
+                <div className="rounded-2xl p-5" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                  <h3 className="text-sm font-bold uppercase tracking-wider mb-4" style={{ color: 'var(--c-text-2)' }}>Case Details</h3>
+
+                  {/* Editable case number */}
+                  <CaseNumberEdit
+                    propertyId={p.distress.lead_id}
+                    initialValue={p.distress.case_number ?? null}
+                  />
+
+                  <InfoRow label="Folio / APN"  value={<span className="font-mono text-xs">{p.distress.folio_number ?? p.folio}</span>} />
+                  <InfoRow label="Date Filed"   value={p.distress.file_date ? new Date(p.distress.file_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : null} />
+                  <InfoRow label="Case Type"    value={
+                    p.distress.foreclosure_type === 'P' ? 'Pre-Foreclosure (Lis Pendens)'
+                    : p.distress.foreclosure_type === 'F' ? 'Foreclosure'
+                    : p.distress.foreclosure_type === 'A' ? 'Auction'
+                    : p.distress.case_type
+                  } />
+                  <InfoRow label="Plaintiff"    value={p.distress.plaintiff} />
+                  <InfoRow label="Lender"       value={p.distress.lender_name} />
+                  <InfoRow label="Lien Amount"  value={p.distress.lien_amount ? fmt$(p.distress.lien_amount) : null} />
+                  <InfoRow label="County"       value={COUNTY_LABELS[p.distress.county ?? ''] ?? p.distress.county} />
+
+                  {/* County clerk link */}
+                  {(() => {
+                    const clerkUrls: Record<string, string> = {
+                      'miami-dade': 'https://www.miami-dadeclerk.com/ocs/CaseSearch.aspx',
+                      'broward':    'https://www.browardclerk.org/Web2/CaseSearch',
+                      'palm-beach': 'https://courtrecords.mypalmbeachclerk.com/DORIS',
+                    }
+                    const url = clerkUrls[p.distress?.county ?? '']
+                    return url ? (
+                      <a href={url} target="_blank" rel="noopener noreferrer"
+                        className="flex items-center gap-2 mt-4 text-xs font-semibold px-3 py-2 rounded-lg hover:opacity-80"
+                        style={{ backgroundColor: 'rgba(201,168,76,0.1)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.3)' }}>
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                        </svg>
+                        Verify on {COUNTY_LABELS[p.distress.county ?? ''] ?? p.distress.county} Clerk →
+                      </a>
+                    ) : null
+                  })()}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-20 text-center">
+                  <p className="text-4xl mb-3">📋</p>
+                  <p className="font-bold mb-1" style={{ color: 'var(--c-primary)' }}>Not in Distress Database</p>
+                  <p className="text-sm" style={{ color: 'var(--c-text-3)' }}>
+                    This property has no foreclosure, lis pendens, or auction record in NextKey OS.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Source note */}
           <p className="text-[10px] pb-2" style={{ color: 'var(--c-text-3)' }}>
-            Source: {p.source === 'miami-dade-pa' ? 'Miami-Dade Property Appraiser (official)' : p.source === 'reapi' ? 'RealEstateAPI.com' : p.source}
+            Source: {p.source_display ?? (p.source === 'miami-dade-pa' ? 'Miami-Dade Property Appraiser (official)' : p.source === 'reapi' ? 'RealEstateAPI.com' : p.source)}
             {p.pa_url && <> · <a href={p.pa_url} target="_blank" rel="noreferrer" className="underline hover:opacity-70">Official PA record ↗</a></>}
           </p>
         </div>

@@ -8,7 +8,7 @@
  * what they searched for and allow quick modifications.
  */
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -110,6 +110,510 @@ function buildChips(params: URLSearchParams): { key: string; label: string }[] {
   if (params.get('has_phone') === 'true')    add('has_phone',   'Has Phone')
   if (params.get('zone'))                    add('zone',        '📍 Zone Filter Active')
   return chips
+}
+
+// ─── Property Detail Drawer ───────────────────────────────────────────────────
+
+type DrawerTab = 'overview' | 'case' | 'comps'
+
+function DRow({ label, value }: { label: string; value?: React.ReactNode }) {
+  if (!value && value !== 0) return null
+  return (
+    <div className="flex items-start justify-between py-2" style={{ borderBottom: '1px solid var(--c-border)' }}>
+      <span className="text-xs shrink-0 w-32 pt-0.5" style={{ color: 'var(--c-text-2)' }}>{label}</span>
+      <span className="text-sm font-medium text-right" style={{ color: 'var(--c-primary)' }}>{value}</span>
+    </div>
+  )
+}
+
+function DrawerCaseNumberRow({
+  propertyId,
+  initialValue,
+  onSaved,
+}: {
+  propertyId: string | null
+  initialValue: string | null
+  onSaved: (val: string) => void
+}) {
+  const [editing, setEditing]   = useState(false)
+  const [value,   setValue]     = useState(initialValue ?? '')
+  const [saving,  setSaving]    = useState(false)
+  const [error,   setError]     = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => { setValue(initialValue ?? '') }, [initialValue])
+
+  const startEdit = () => {
+    if (!propertyId) return
+    setEditing(true); setError('')
+    setTimeout(() => inputRef.current?.focus(), 50)
+  }
+  const cancel = () => { setEditing(false); setValue(initialValue ?? ''); setError('') }
+  const save = async () => {
+    const trimmed = value.trim()
+    if (!trimmed || !propertyId) return
+    setSaving(true); setError('')
+    try {
+      const res = await fetch(`/api/properties/${propertyId}/case-number`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ case_number: trimmed }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      onSaved(trimmed); setEditing(false)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Save failed')
+    } finally { setSaving(false) }
+  }
+
+  const hasValue  = Boolean(initialValue)
+  const canEdit   = Boolean(propertyId) // can only edit saved properties
+
+  return (
+    <div className="flex items-center justify-between py-2" style={{ borderBottom: '1px solid var(--c-border)' }}>
+      <span className="text-xs shrink-0 w-32" style={{ color: 'var(--c-text-2)' }}>Case Number</span>
+      {editing ? (
+        <div className="flex items-center gap-2">
+          <input ref={inputRef} type="text" value={value}
+            onChange={e => setValue(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') cancel() }}
+            placeholder="e.g. CACE-25-012345"
+            className="text-xs rounded-lg px-2 py-1 w-36"
+            style={{ backgroundColor: 'var(--c-card-alt)', border: '1px solid var(--c-border)', color: 'var(--c-primary)', outline: 'none' }} />
+          <button onClick={save} disabled={saving}
+            className="text-xs px-2 py-1 rounded-lg"
+            style={{ backgroundColor: 'rgba(76,175,154,0.15)', color: '#4CAF9A', border: '1px solid rgba(76,175,154,0.3)' }}>
+            {saving ? '…' : '✓'}
+          </button>
+          <button onClick={cancel}
+            className="text-xs px-2 py-1 rounded-lg"
+            style={{ backgroundColor: 'rgba(255,255,255,0.05)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+            ✕
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium"
+            style={{ color: hasValue ? 'var(--c-primary)' : 'rgba(255,255,255,0.25)', fontStyle: hasValue ? 'normal' : 'italic' }}>
+            {hasValue ? initialValue : canEdit ? 'Pending lookup' : 'Save first'}
+          </span>
+          {canEdit && (
+            <button onClick={startEdit} title="Edit case number" className="text-xs hover:opacity-80"
+              style={{ color: 'rgba(255,255,255,0.35)' }}>✎</button>
+          )}
+        </div>
+      )}
+      {error && <span className="text-[10px] ml-2" style={{ color: '#ef4444' }}>{error}</span>}
+    </div>
+  )
+}
+
+const COUNTY_CLERK_URLS: Record<string, string> = {
+  'miami-dade': 'https://www.miami-dadeclerk.com/ocs/CaseSearch.aspx',
+  'broward':    'https://www.browardclerk.org/Web2/CaseSearch',
+  'palm-beach': 'https://courtrecords.mypalmbeachclerk.com/DORIS',
+}
+
+// ─── Drawer Comps Panel ───────────────────────────────────────────────────────
+
+interface DrawerComp {
+  mls_number:     string | null
+  address:        string
+  city:           string
+  status:         string
+  beds:           number | null
+  baths:          number | null
+  living_area:    number | null
+  year_built:     number | null
+  list_price:     number | null
+  sold_price:     number | null
+  price_per_sqft: number | null
+  sold_date:      string | null
+  days_on_market: number | null
+  distance_miles: number | null
+}
+interface DrawerCompsResult {
+  sold:               DrawerComp[]
+  active:             DrawerComp[]
+  pending:            DrawerComp[]
+  median_sold_price:  number | null
+  avg_price_per_sqft: number | null
+}
+
+function DrawerComps({ lead }: { lead: Lead }) {
+  const [result,  setResult]  = useState<DrawerCompsResult | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error,   setError]   = useState<string | null>(null)
+  const [noKey,   setNoKey]   = useState(false)
+  const [radius,  setRadius]  = useState(0.5)
+
+  const load = async (r = radius) => {
+    const addrFull = [lead.property_address, lead.city, lead.state ?? 'FL', lead.zip].filter(Boolean).join(', ')
+    setLoading(true); setError(null)
+    try {
+      const p = new URLSearchParams({ address: addrFull, radius: String(r) })
+      if (lead.beds)        p.set('beds', String(lead.beds))
+      if (lead.living_area) p.set('sqft', String(lead.living_area))
+      const res  = await fetch(`/api/mls/comps?${p}`)
+      const data = await res.json()
+      if (!res.ok) {
+        if (data.code === 'NO_CREDENTIALS') setNoKey(true)
+        else setError(data.error ?? 'MLS error')
+      } else {
+        setResult(data as DrawerCompsResult)
+      }
+    } catch { setError('Network error') }
+    finally { setLoading(false) }
+  }
+
+  useEffect(() => { load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (noKey) {
+    return (
+      <div className="rounded-xl p-5 text-center" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+        <p className="text-2xl mb-2">🔑</p>
+        <p className="text-sm font-bold mb-1" style={{ color: 'var(--c-primary)' }}>Beaches MLS Not Connected</p>
+        <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>
+          Add <code className="px-1 rounded" style={{ backgroundColor: 'var(--c-hover)' }}>RENTCAST_API_KEY</code> to Vercel environment variables to enable live comps.
+        </p>
+      </div>
+    )
+  }
+
+  const RadiusBar = () => (
+    <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center gap-1.5">
+        <span className="text-[9px] font-bold px-2 py-0.5 rounded-full"
+          style={{ backgroundColor: 'rgba(76,175,154,0.12)', color: '#4CAF9A', border: '1px solid rgba(76,175,154,0.25)' }}>
+          {result ? ((result as DrawerCompsResult & { source?: string }).source === 'rentcast' ? 'Rentcast' : 'Beaches MLS') : 'MLS'}
+        </span>
+      </div>
+      <div className="flex items-center gap-1">
+        {[0.25, 0.5, 1].map(r => (
+          <button key={r} onClick={() => { setRadius(r); load(r) }}
+            className="px-2 py-0.5 text-[10px] font-bold rounded-lg transition-all"
+            style={{
+              backgroundColor: radius === r ? 'rgba(201,168,76,0.15)' : 'var(--c-hover)',
+              color:           radius === r ? '#C9A84C' : 'var(--c-text-3)',
+              border:          `1px solid ${radius === r ? 'rgba(201,168,76,0.35)' : 'var(--c-border)'}`,
+            }}>
+            {r}mi
+          </button>
+        ))}
+        <button onClick={() => load()} disabled={loading}
+          className="px-2 py-0.5 text-[10px] font-bold rounded-lg hover:opacity-80 ml-1"
+          style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+          {loading ? '…' : '↻'}
+        </button>
+      </div>
+    </div>
+  )
+
+  if (loading && !result) {
+    return (
+      <div>
+        <RadiusBar />
+        {[1,2,3].map(i => <div key={i} className="rounded-xl h-16 mb-2 animate-pulse" style={{ backgroundColor: 'var(--c-card)' }} />)}
+      </div>
+    )
+  }
+
+  if (error && !result) {
+    return (
+      <div>
+        <RadiusBar />
+        <div className="rounded-xl p-4 text-center" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+          <p className="text-xs" style={{ color: '#E74C3C' }}>{error}</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!result) return null
+
+  const { sold, active, pending, median_sold_price, avg_price_per_sqft } = result
+
+  return (
+    <div>
+      <RadiusBar />
+
+      {/* Stats */}
+      {(median_sold_price || avg_price_per_sqft) && (
+        <div className="grid grid-cols-3 gap-2 mb-4">
+          {[
+            { label: 'Median Sold',  value: median_sold_price  ? fmt$(median_sold_price)       : '—', color: '#4CAF9A' },
+            { label: 'Avg $/sqft',   value: avg_price_per_sqft ? `$${avg_price_per_sqft}/sf`   : '—' },
+            { label: 'Comps',        value: `${sold.length}s / ${active.length}a` },
+          ].map(s => (
+            <div key={s.label} className="rounded-xl p-3" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+              <p className="text-[9px] font-bold uppercase tracking-wider mb-0.5" style={{ color: 'var(--c-text-3)' }}>{s.label}</p>
+              <p className="text-sm font-bold" style={{ color: (s as { color?: string }).color ?? 'var(--c-primary)' }}>{s.value}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {sold.length + active.length + pending.length === 0 && (
+        <p className="text-xs text-center py-4" style={{ color: 'var(--c-text-3)' }}>
+          No comps found within {radius}mi — try expanding the radius
+        </p>
+      )}
+
+      {[
+        { label: 'Sold',    items: sold,    color: '#4CAF9A', pk: 'sold_price' as const },
+        { label: 'Active',  items: active,  color: '#C9A84C', pk: 'list_price' as const },
+        { label: 'Pending', items: pending, color: '#7B8FD4', pk: 'list_price' as const },
+      ].map(({ label, items, color, pk }) => items.length > 0 && (
+        <div key={label} className="mb-4">
+          <h4 className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color }}>
+            {label} ({items.length})
+          </h4>
+          <div className="space-y-2">
+            {items.map((c, i) => (
+              <div key={c.mls_number ?? i} className="rounded-lg p-3"
+                style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                <div className="flex items-start justify-between">
+                  <div className="min-w-0 flex-1 pr-2">
+                    <p className="text-xs font-semibold truncate" style={{ color: 'var(--c-primary)' }}>
+                      {c.address}{c.city ? `, ${c.city}` : ''}
+                    </p>
+                    <p className="text-[10px] mt-0.5" style={{ color: 'var(--c-text-3)' }}>
+                      {[
+                        c.beds        ? `${c.beds}bd`                          : null,
+                        c.baths       ? `${c.baths}ba`                         : null,
+                        c.living_area ? `${c.living_area.toLocaleString()} sf` : null,
+                        c.distance_miles ? `${c.distance_miles}mi`             : null,
+                        c.sold_date   ? new Date(c.sold_date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : null,
+                        c.days_on_market != null ? `${c.days_on_market}d`      : null,
+                      ].filter(Boolean).join(' · ')}
+                    </p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className="text-sm font-bold" style={{ color }}>{fmt$(c[pk])}</p>
+                    {c.price_per_sqft && <p className="text-[10px]" style={{ color: 'var(--c-text-3)' }}>${c.price_per_sqft}/sf</p>}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ─── Property Drawer ─────────────────────────────────────────────────────────
+
+function PropertyDrawer({
+  lead,
+  onClose,
+  onSave,
+  onCaseNumberUpdate,
+}: {
+  lead: Lead
+  onClose: () => void
+  onSave:  (id: string) => void
+  onCaseNumberUpdate: (id: string, caseNum: string) => void
+}) {
+  const router = useRouter()
+  const [tab, setTab] = useState<DrawerTab>('overview')
+  const [saving, setSaving] = useState(false)
+
+  const isSaved   = Boolean(lead.lead_id || lead.is_lead)
+  const propertyId = isSaved ? (lead.property_id ?? lead.id) : null
+  const days      = daysSince(lead.file_date)
+  const ageClr    = distressAgeColor(days)
+  const countyClerkUrl = COUNTY_CLERK_URLS[lead.county]
+
+  const ltTags = getLeadTypeTags(lead)
+
+  const handleSave = async () => {
+    setSaving(true)
+    await onSave(lead.id)
+    setSaving(false)
+  }
+
+  // Filter out synthetic REAPI- ids for navigation
+  const canNavigate = isSaved && propertyId && !String(propertyId).startsWith('REAPI-')
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div
+        className="fixed inset-0 z-40"
+        style={{ backgroundColor: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(2px)' }}
+        onClick={onClose}
+      />
+
+      {/* Drawer */}
+      <div
+        className="fixed right-0 top-0 bottom-0 z-50 flex flex-col overflow-hidden"
+        style={{
+          width: 'min(480px, 95vw)',
+          backgroundColor: 'var(--c-bg)',
+          borderLeft: '1px solid var(--c-border)',
+          boxShadow: '-4px 0 32px rgba(0,0,0,0.4)',
+        }}
+      >
+        {/* Header */}
+        <div className="px-5 py-4 flex items-start justify-between gap-3"
+          style={{ backgroundColor: 'var(--c-card)', borderBottom: '1px solid var(--c-border)' }}>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-bold truncate" style={{ color: 'var(--c-primary)' }}>
+              {lead.property_address || '—'}
+            </p>
+            <p className="text-xs mt-0.5" style={{ color: 'var(--c-text-3)' }}>
+              {lead.city}{lead.zip ? `, FL ${lead.zip}` : ''} · {lead.county === 'miami-dade' ? 'Miami-Dade' : lead.county === 'broward' ? 'Broward' : lead.county === 'palm-beach' ? 'Palm Beach' : lead.county}
+            </p>
+            <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+              {ltTags.map(t => (
+                <span key={t.label} className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+                  style={{ backgroundColor: `${t.color}20`, color: t.color }}>{t.label}</span>
+              ))}
+              {isSaved && (
+                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+                  style={{ backgroundColor: 'rgba(76,175,154,0.15)', color: '#4CAF9A' }}>✓ In Contacts</span>
+              )}
+            </div>
+          </div>
+          <button onClick={onClose}
+            className="shrink-0 text-lg leading-none hover:opacity-60"
+            style={{ color: 'var(--c-text-3)' }}>✕</button>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex px-5 pt-3 gap-1"
+          style={{ backgroundColor: 'var(--c-card)', borderBottom: '1px solid var(--c-border)' }}>
+          {([['overview', 'Overview'], ['case', 'Case Details'], ['comps', 'Comps']] as [DrawerTab, string][]).map(([k, label]) => (
+            <button key={k} onClick={() => setTab(k)}
+              className="text-xs font-semibold px-3 py-2 rounded-t-lg transition-colors"
+              style={{
+                color: tab === k ? '#C9A84C' : 'var(--c-text-3)',
+                borderBottom: `2px solid ${tab === k ? '#C9A84C' : 'transparent'}`,
+                backgroundColor: tab === k ? 'rgba(201,168,76,0.06)' : 'transparent',
+              }}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Tab content */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+
+          {/* ── OVERVIEW ── */}
+          {tab === 'overview' && (
+            <>
+              {/* Key stats */}
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { label: 'Est. Value',  value: fmt$(lead.market_value || lead.assessed_value), color: 'var(--c-primary)' },
+                  { label: 'Equity',      value: lead.equity_tier ?? '—', color: EQUITY_COLORS[lead.equity_tier] ?? '#9ca3af' },
+                  { label: 'Filed',       value: days !== null ? `${days}d` : '—', color: ageClr },
+                ].map(s => (
+                  <div key={s.label} className="rounded-xl p-3" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider mb-1" style={{ color: 'var(--c-text-3)' }}>{s.label}</p>
+                    <p className="text-base font-bold" style={{ color: s.color }}>{s.value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Owner */}
+              <div className="rounded-xl p-4 space-y-0.5" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                <h4 className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--c-text-2)' }}>Owner</h4>
+                <DRow label="Owner Name"  value={lead.owner_name || lead.mortgagor} />
+                <DRow label="Entity Type" value={lead.entity_type} />
+                <DRow label="Homestead"   value={lead.homestead ? '✓ Owner-Occupied' : 'No'} />
+                <DRow label="Absentee"    value={lead.absentee_owner ? '✓ Yes' : null} />
+              </div>
+
+              {/* Property */}
+              <div className="rounded-xl p-4" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                <h4 className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--c-text-2)' }}>Property</h4>
+                <DRow label="Beds / Baths" value={[lead.beds && `${lead.beds} bd`, lead.baths && `${lead.baths} ba`].filter(Boolean).join(' · ') || null} />
+                <DRow label="Living Area"  value={lead.living_area ? `${Number(lead.living_area).toLocaleString()} sqft` : null} />
+                <DRow label="Year Built"   value={lead.year_built} />
+                <DRow label="Type"         value={lead.property_type} />
+                <DRow label="Lender"       value={lead.lender_name} />
+                <DRow label="Loan Balance" value={lead.known_debt ? fmt$(lead.known_debt) : null} />
+              </div>
+            </>
+          )}
+
+          {/* ── COMPS ── */}
+          {tab === 'comps' && (
+            <DrawerComps lead={lead} />
+          )}
+
+          {/* ── CASE DETAILS ── */}
+          {tab === 'case' && (
+            <div className="rounded-xl p-4" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+              <h4 className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--c-text-2)' }}>Case Details</h4>
+
+              <DrawerCaseNumberRow
+                propertyId={propertyId}
+                initialValue={lead.case_number ?? null}
+                onSaved={val => onCaseNumberUpdate(lead.id, val)}
+              />
+
+              <DRow label="Folio / APN"  value={<span className="font-mono text-xs">{lead.folio_number}</span>} />
+              <DRow label="Date Filed"   value={lead.file_date ? new Date(lead.file_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : null} />
+              <DRow label="Case Type"    value={
+                lead.foreclosure_type === 'P' ? 'Pre-Foreclosure (Lis Pendens)'
+                : lead.foreclosure_type === 'F' ? 'Foreclosure'
+                : lead.foreclosure_type === 'A' ? 'Auction'
+                : lead.foreclosure_type
+              } />
+              <DRow label="Plaintiff"    value={lead.plaintiff} />
+              <DRow label="Lender"       value={lead.lender_name} />
+              <DRow label="Loan Balance" value={lead.known_debt ? fmt$(lead.known_debt) : null} />
+              <DRow label="Data Source"  value={lead.data_source} />
+
+              {!isSaved && (
+                <p className="text-xs mt-4 px-3 py-2 rounded-lg"
+                  style={{ backgroundColor: 'rgba(201,168,76,0.08)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.2)' }}>
+                  ⚡ Case number will be looked up from REAPI when you save this property.
+                </p>
+              )}
+
+              {countyClerkUrl && (
+                <a href={countyClerkUrl} target="_blank" rel="noopener noreferrer"
+                  className="flex items-center gap-2 mt-4 text-xs font-semibold px-3 py-2 rounded-lg hover:opacity-80"
+                  style={{ backgroundColor: 'rgba(201,168,76,0.1)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.3)' }}>
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                  </svg>
+                  Verify on {lead.county === 'miami-dade' ? 'Miami-Dade' : lead.county === 'broward' ? 'Broward' : 'Palm Beach'} Clerk →
+                </a>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer actions */}
+        <div className="px-5 py-4 flex gap-3"
+          style={{ backgroundColor: 'var(--c-card)', borderTop: '1px solid var(--c-border)' }}>
+          {canNavigate ? (
+            <button onClick={() => router.push(`/leads/${propertyId}`)}
+              className="flex-1 text-sm font-bold py-2.5 rounded-xl hover:opacity-80"
+              style={{ backgroundColor: '#C9A84C', color: '#0A1F44' }}>
+              Open Full Lead →
+            </button>
+          ) : !isSaved ? (
+            <button onClick={handleSave} disabled={saving}
+              className="flex-1 text-sm font-bold py-2.5 rounded-xl hover:opacity-80 disabled:opacity-50"
+              style={{ backgroundColor: '#C9A84C', color: '#0A1F44' }}>
+              {saving ? 'Saving…' : '+ Save to Contacts'}
+            </button>
+          ) : null}
+          <button onClick={onClose}
+            className="px-4 text-sm font-semibold py-2.5 rounded-xl hover:opacity-80"
+            style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+            Close
+          </button>
+        </div>
+      </div>
+    </>
+  )
 }
 
 // ─── Row component ────────────────────────────────────────────────────────────
@@ -320,32 +824,49 @@ export default function SearchResultsClient() {
   const [loading, setLoading] = useState(true)
 
   const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [sortBy, setSortBy]     = useState<'file_date' | 'equity_percentage' | 'market_value' | 'lead_score'>('file_date')
+  const [sortBy, setSortBy]     = useState<'file_date' | 'equity_percentage' | 'market_value'>('file_date')
   const [sortDir, setSortDir]   = useState<'desc' | 'asc'>('desc')
+  const [cached, setCached]     = useState<boolean | null>(null)
+  const [error, setError]       = useState<string | null>(null)
+  const [dbFallback, setDbFallback] = useState<string | null>(null)  // warning msg when showing saved DB results
+  const [drawerLead, setDrawerLead] = useState<Lead | null>(null)
 
-  // Build chips from URL params
-  const chips = buildChips(rawParams)
-
-  // ── Fetch ───────────────────────────────────────────────────────────────
+  // ── Fetch — calls live REAPI search API (with smart caching) ─────────────
 
   const fetchResults = useCallback(async (p = 1) => {
     setLoading(true)
+    setError(null)
+    setDbFallback(null)
     const params = new URLSearchParams(rawParams.toString())
     params.set('page',     String(p))
-    params.set('limit',    '200')
+    params.set('limit',    '50')
     params.set('sort_by',  sortBy)
     params.set('sort_dir', sortDir)
-    params.delete('zone')  // zone is client-side only for now
 
     try {
-      const res  = await fetch(`/api/properties?${params}`)
+      const res  = await fetch(`/api/property-search/live?${params}`)
       const data = await res.json()
-      setLeads(data.properties || data.leads || [])
+
+      if (!res.ok) {
+        setError(data.error ?? 'Search failed')
+        setLeads([])
+        setTotal(0)
+        return
+      }
+
+      // DB fallback: REAPI unavailable — show warning banner but still render results
+      if (data.db_fallback) {
+        setDbFallback(data.warning ?? 'Showing saved properties — live search unavailable.')
+      }
+
+      setLeads(data.properties || [])
       setTotal(data.total || 0)
       setPage(data.page  || 1)
       setPages(data.pages || 1)
-    } catch { /* noop */ }
-    finally { setLoading(false) }
+      setCached(data.cached ?? false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Network error')
+    } finally { setLoading(false) }
   }, [rawParams, sortBy, sortDir])
 
   useEffect(() => { fetchResults(1) }, [sortBy, sortDir]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -358,19 +879,43 @@ export default function SearchResultsClient() {
   const clearSelect   = () => setSelected(new Set())
   const allSelected   = leads.length > 0 && selected.size === leads.length
 
+  /** Save a live search result permanently and add to contacts */
   const addToLeads = async (id: string) => {
-    const res = await fetch('/api/properties/' + id + '/add-lead', { method: 'POST' })
+    const prop = leads.find(l => l.id === id)
+    if (!prop) return
+    const res = await fetch('/api/properties/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ property: prop }),
+    })
     if (res.ok) {
-      const { lead_id } = await res.json()
-      setLeads(prev => prev.map(l => l.id === id ? { ...l, lead_id } : l))
+      const { lead_id, property_id } = await res.json()
+      // Update both the list and the open drawer
+      setLeads(prev => prev.map(l => l.id === id
+        ? { ...l, lead_id, id: property_id, is_lead: true }
+        : l
+      ))
+      setDrawerLead(prev => prev?.id === id ? { ...prev, lead_id, id: property_id, is_lead: true } : prev)
     }
   }
 
+  /** Update case number in local state after manual edit */
+  const handleCaseNumberUpdate = (id: string, caseNum: string) => {
+    setLeads(prev => prev.map(l => l.id === id ? { ...l, case_number: caseNum } : l))
+    setDrawerLead(prev => prev?.id === id ? { ...prev, case_number: caseNum } : prev)
+  }
+
   const bulkAddToLeads = async () => {
-    const ids = Array.from(selected)
-    await Promise.all(ids.map(id => fetch('/api/properties/' + id + '/add-lead', { method: 'POST' })))
-    fetchResults(page)
+    const toSave = leads.filter(l => selected.has(l.id))
+    await Promise.all(toSave.map(prop =>
+      fetch('/api/properties/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ property: prop }),
+      })
+    ))
     clearSelect()
+    fetchResults(page)
   }
 
   const exportCSV = () => {
@@ -404,8 +949,19 @@ export default function SearchResultsClient() {
 
             <div>
               <h1 className="text-lg font-bold" style={{ color: 'var(--c-primary)' }}>Search Results</h1>
-              <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>
-                {loading ? 'Searching…' : `${total.toLocaleString()} matching propert${total === 1 ? 'y' : 'ies'}`}
+              <p className="text-xs flex items-center gap-2" style={{ color: 'var(--c-text-3)' }}>
+                {loading ? (dbFallback ? 'Searching saved properties…' : 'Querying live market…') : `${total.toLocaleString()} propert${total === 1 ? 'y' : 'ies'}`}
+                {!loading && (
+                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+                    style={{
+                      backgroundColor: dbFallback
+                        ? 'rgba(201,168,76,0.15)'
+                        : cached ? 'rgba(76,175,154,0.15)' : 'rgba(201,168,76,0.15)',
+                      color: dbFallback ? '#C9A84C' : cached ? '#4CAF9A' : '#C9A84C',
+                    }}>
+                    {dbFallback ? '📦 saved' : cached ? '⚡ cached' : '🔴 live'}
+                  </span>
+                )}
               </p>
             </div>
           </div>
@@ -423,22 +979,24 @@ export default function SearchResultsClient() {
           </div>
         </div>
 
-        {/* Applied criteria chips */}
-        {chips.length > 0 && (
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[10px] font-bold uppercase tracking-widest shrink-0" style={{ color: 'var(--c-text-3)' }}>
-              Filters:
-            </span>
-            {chips.map(chip => (
-              <span key={chip.key}
-                className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full whitespace-nowrap"
-                style={{ backgroundColor: 'rgba(201,168,76,0.12)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.25)' }}>
-                {chip.label}
-              </span>
-            ))}
-          </div>
-        )}
       </div>
+
+      {/* ── DB Fallback warning banner ─────────────────────────────────────── */}
+      {dbFallback && !loading && (
+        <div className="px-5 py-2.5 flex items-start gap-3"
+          style={{ backgroundColor: 'rgba(201,168,76,0.08)', borderBottom: '1px solid rgba(201,168,76,0.25)' }}>
+          <span className="text-sm shrink-0 mt-0.5">⚠️</span>
+          <div className="flex-1 min-w-0">
+            <p className="text-[11px] font-bold" style={{ color: '#C9A84C' }}>Live Search Unavailable</p>
+            <p className="text-[10px] mt-0.5" style={{ color: 'var(--c-text-3)' }}>{dbFallback}</p>
+          </div>
+          <a href="https://console.realestateapi.com/dashboard/billing" target="_blank" rel="noopener noreferrer"
+            className="text-[10px] font-bold px-2.5 py-1 rounded-lg shrink-0 hover:opacity-80"
+            style={{ backgroundColor: '#C9A84C', color: '#0A1F44' }}>
+            Add Funds
+          </a>
+        </div>
+      )}
 
       {/* ── Table toolbar ─────────────────────────────────────────────────── */}
       <div className="sticky top-0 z-10 px-5 py-2 flex items-center gap-3 flex-wrap"
@@ -486,7 +1044,6 @@ export default function SearchResultsClient() {
             <option value="file_date">Filed Date</option>
             <option value="equity_percentage">Equity %</option>
             <option value="market_value">Value</option>
-            <option value="lead_score">AI Score</option>
           </select>
           <button onClick={() => setSortDir(d => d === 'desc' ? 'asc' : 'desc')}
             className="text-[11px] px-2 py-1 rounded-lg"
@@ -503,7 +1060,29 @@ export default function SearchResultsClient() {
             <div className="text-center">
               <div className="w-8 h-8 border-2 border-t-transparent rounded-full animate-spin mx-auto mb-3"
                 style={{ borderColor: '#C9A84C', borderTopColor: 'transparent' }} />
-              <p className="text-sm" style={{ color: 'var(--c-text-3)' }}>Searching database…</p>
+              <p className="text-sm font-semibold" style={{ color: 'var(--c-primary)' }}>Searching live market…</p>
+              <p className="text-xs mt-1" style={{ color: 'var(--c-text-3)' }}>Querying RealEstateAPI</p>
+            </div>
+          </div>
+        ) : error ? (
+          <div className="flex items-center justify-center py-24">
+            <div className="text-center max-w-md px-6">
+              <p className="text-4xl mb-4">⚠️</p>
+              <p className="text-sm font-bold mb-2" style={{ color: 'var(--c-primary)' }}>Search Error</p>
+              <p className="text-xs font-mono p-3 rounded-xl mb-4"
+                style={{ backgroundColor: 'rgba(239,68,68,0.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.2)' }}>
+                {error}
+              </p>
+              <button onClick={() => fetchResults(1)}
+                className="text-sm font-bold px-4 py-2 rounded-xl hover:opacity-80 mr-2"
+                style={{ backgroundColor: '#C9A84C', color: '#0A1F44' }}>
+                Retry
+              </button>
+              <button onClick={() => router.push('/property-search')}
+                className="text-sm font-semibold px-4 py-2 rounded-xl hover:opacity-80"
+                style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+                Modify Search
+              </button>
             </div>
           </div>
         ) : leads.length === 0 ? (
@@ -540,7 +1119,7 @@ export default function SearchResultsClient() {
                     lead={lead}
                     selected={selected.has(lead.id)}
                     onSelect={toggleSelect}
-                    onClick={id => router.push(`/leads/${id}`)}
+                    onClick={id => setDrawerLead(leads.find(l => l.id === id) ?? null)}
                     onAddToLeads={addToLeads}
                   />
                 ))}
@@ -568,6 +1147,16 @@ export default function SearchResultsClient() {
           </div>
         )}
       </div>
+
+      {/* ── Property Detail Drawer ─────────────────────────────────────── */}
+      {drawerLead && (
+        <PropertyDrawer
+          lead={drawerLead}
+          onClose={() => setDrawerLead(null)}
+          onSave={addToLeads}
+          onCaseNumberUpdate={handleCaseNumberUpdate}
+        />
+      )}
     </div>
   )
 }

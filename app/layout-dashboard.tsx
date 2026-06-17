@@ -16,6 +16,15 @@ const navItems = [
     ),
   },
   {
+    label: 'Leads',
+    href: '/leads',
+    icon: (
+      <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+      </svg>
+    ),
+  },
+  {
     label: 'Contacts',
     href: '/contacts',
     icon: (
@@ -72,7 +81,7 @@ const navItems = [
 ]
 
 // Bottom nav primary items — everything else goes in the "More" sheet
-const bottomNavHrefs = ['/', '/contacts', '/inbox', '/deals', '/pipeline']
+const bottomNavHrefs = ['/', '/leads', '/contacts', '/inbox', '/pipeline']
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
@@ -123,6 +132,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const isActive = (href: string) => {
     if (href === '/') return pathname === '/'
     if (href === '/property-search') return pathname.startsWith('/property-search')
+    if (href === '/leads') return pathname.startsWith('/leads')
     return pathname.startsWith(href.split('?')[0])
   }
 

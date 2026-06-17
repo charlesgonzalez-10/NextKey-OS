@@ -66,19 +66,33 @@ export interface PropertySearchResult {
   // Links
   pa_url:           string | null   // link to county PA website for this property
 
+  // Source provenance (added by layered lookup system)
+  source_display?:       string      // human-readable, e.g. "Broward County Property Appraiser"
+  source_type?:          'public' | 'paid' | 'internal'
+  source_url?:           string | null
+  source_confidence?:    number      // 0–100
+  source_checked_at?:    string      // ISO timestamp of last successful lookup
+  needs_enrichment?:     boolean     // true when source is partial (confidence < 75)
+
   // Raw API response for storage/debugging
   raw:              unknown
 }
 
 export interface PropertyDistressData {
   lead_id:        string
+  case_number:    string | null
+  folio_number:   string | null
   file_date:      string | null
   case_type:      string | null
+  foreclosure_type: string | null
+  plaintiff:      string | null
+  lender_name:    string | null
   lien_amount:    number | null
   lien_count:     number | null
   pipeline_stage: string | null
   starred:        boolean
   lead_score:     number | null
+  county:         string | null
 }
 
 // ─── Comps (from MLS / market data) ─────────────────────────────────────────
@@ -130,8 +144,8 @@ export interface MarketStats {
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
 
-export type County     = 'miami-dade' | 'broward' | 'palm-beach' | 'unknown'
-export type DataSource = 'miami-dade-pa' | 'reapi' | 'scraper' | 'manual'
+export type County     = 'miami-dade' | 'broward' | 'palm-beach' | 'martin' | 'st-lucie' | 'unknown'
+export type DataSource = 'miami-dade-pa' | 'broward-pa' | 'palm-beach-pa' | 'martin-pa' | 'st-lucie-pa' | 'reapi' | 'scraper' | 'manual'
 export type CompSource = 'beaches-mls' | 'miami-mls' | 'rentcast' | 'reapi'
 export type CompStatus = 'sold' | 'active' | 'pending' | 'rental' | 'expired'
 

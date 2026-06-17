@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
+import PropertyMapCard from '@/components/PropertyMapCard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -158,6 +159,127 @@ function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
   )
 }
 
+// ─── Editable Case Number Row ─────────────────────────────────────────────────
+
+function CaseNumberRow({
+  propertyId,
+  initialValue,
+  onSaved,
+}: {
+  propertyId: string
+  initialValue: string | null
+  onSaved: (val: string) => void
+}) {
+  const [editing, setEditing]   = useState(false)
+  const [value,   setValue]     = useState(initialValue ?? '')
+  const [saving,  setSaving]    = useState(false)
+  const [error,   setError]     = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  // If we get a value from parent (e.g. REAPI filled it in), update state
+  useEffect(() => { setValue(initialValue ?? '') }, [initialValue])
+
+  const startEdit = () => {
+    setEditing(true)
+    setError('')
+    setTimeout(() => inputRef.current?.focus(), 50)
+  }
+
+  const cancel = () => {
+    setEditing(false)
+    setValue(initialValue ?? '')
+    setError('')
+  }
+
+  const save = async () => {
+    const trimmed = value.trim()
+    if (!trimmed) { setError('Case number cannot be empty'); return }
+    setSaving(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/properties/${propertyId}/case-number`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ case_number: trimmed }),
+      })
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}))
+        throw new Error(d.error ?? `HTTP ${res.status}`)
+      }
+      onSaved(trimmed)
+      setEditing(false)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Save failed')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const hasValue = Boolean(initialValue)
+
+  return (
+    <div className="flex items-start justify-between py-2" style={{ borderBottom: '1px solid var(--c-border)' }}>
+      <span className="text-xs shrink-0 w-36 pt-0.5" style={{ color: 'var(--c-text-2)' }}>Case Number</span>
+
+      {editing ? (
+        <div className="flex items-center gap-2">
+          <input
+            ref={inputRef}
+            type="text"
+            value={value}
+            onChange={e => setValue(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') cancel() }}
+            placeholder="e.g. CACE-25-012345"
+            className="text-sm rounded-lg px-2 py-1 w-44"
+            style={{
+              backgroundColor: 'var(--c-card-alt)',
+              border: `1px solid ${error ? '#ef4444' : 'var(--c-border)'}`,
+              color: 'var(--c-primary)',
+              outline: 'none',
+            }}
+          />
+          <button
+            onClick={save}
+            disabled={saving}
+            className="text-xs font-semibold px-2 py-1 rounded-lg transition-opacity hover:opacity-80"
+            style={{ backgroundColor: 'rgba(76,175,154,0.15)', color: '#4CAF9A', border: '1px solid rgba(76,175,154,0.3)' }}
+          >
+            {saving ? '…' : '✓'}
+          </button>
+          <button
+            onClick={cancel}
+            className="text-xs px-2 py-1 rounded-lg transition-opacity hover:opacity-80"
+            style={{ backgroundColor: 'rgba(255,255,255,0.05)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}
+          >
+            ✕
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <span
+            className="text-sm font-medium text-right"
+            style={{ color: hasValue ? 'var(--c-primary)' : 'rgba(255,255,255,0.25)', fontStyle: hasValue ? 'normal' : 'italic' }}
+          >
+            {hasValue ? initialValue : 'Pending lookup'}
+          </span>
+          <button
+            onClick={startEdit}
+            title="Edit case number"
+            className="text-xs transition-opacity hover:opacity-80"
+            style={{ color: 'rgba(255,255,255,0.35)' }}
+          >
+            ✎
+          </button>
+        </div>
+      )}
+
+      {error && (
+        <div className="absolute text-[10px] mt-8 right-5" style={{ color: '#ef4444' }}>{error}</div>
+      )}
+    </div>
+  )
+}
+
 // ─── Score Ring ───────────────────────────────────────────────────────────────
 
 function ScoreRing({ score, label, size = 80 }: { score: number | null | undefined; label: string; size?: number }) {
@@ -193,107 +315,102 @@ function ScoreRing({ score, label, size = 80 }: { score: number | null | undefin
 
 // ─── Overview Tab ─────────────────────────────────────────────────────────────
 
-function PropertyMedia({ lead }: { lead: Lead }) {
-  const [streetViewOk, setStreetViewOk] = useState(true)
-  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
-
-  const fullAddress = [
-    lead.property_address,
-    lead.city,
-    lead.zip ? `FL ${lead.zip}` : 'FL',
-  ].filter(Boolean).join(', ')
-
-  const encoded = encodeURIComponent(fullAddress)
-
-  if (!apiKey) return null
-
-  return (
-    <div className="rounded-2xl overflow-hidden" style={{ border: '1px solid var(--c-border)' }}>
-      {/* Street View photo */}
-      {streetViewOk ? (
-        <div className="relative w-full" style={{ height: 220 }}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={`https://maps.googleapis.com/maps/api/streetview?size=900x440&location=${encoded}&fov=90&pitch=5&key=${apiKey}`}
-            alt={`Street view of ${lead.property_address}`}
-            className="w-full h-full object-cover"
-            onError={() => setStreetViewOk(false)}
-          />
-          <div className="absolute bottom-0 left-0 right-0 px-3 py-2"
-            style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.5), transparent)' }}>
-            <p className="text-white text-xs font-semibold">{lead.property_address}</p>
-            <p className="text-white/60 text-[11px]">{lead.city}{lead.zip ? `, FL ${lead.zip}` : ''}</p>
-          </div>
-          <a
-            href={`https://www.google.com/maps/search/?api=1&query=${encoded}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="absolute top-2 right-2 text-[10px] font-semibold px-2 py-1 rounded-lg"
-            style={{ backgroundColor: 'rgba(0,0,0,0.5)', color: 'rgba(255,255,255,0.8)' }}
-          >
-            Open in Maps ↗
-          </a>
-        </div>
-      ) : (
-        <div className="flex items-center justify-center h-24 text-sm"
-          style={{ backgroundColor: 'var(--c-card-alt)', color: 'var(--c-text-3)' }}>
-          Street view not available
-        </div>
-      )}
-
-      {/* Map embed */}
-      <div style={{ height: 200 }}>
-        <iframe
-          title="Property location"
-          width="100%"
-          height="200"
-          style={{ border: 'none', display: 'block' }}
-          loading="lazy"
-          referrerPolicy="no-referrer-when-downgrade"
-          src={`https://www.google.com/maps/embed/v1/place?key=${apiKey}&q=${encoded}&zoom=16`}
-        />
-      </div>
-    </div>
-  )
-}
-
-function OverviewTab({ lead, onReenrich, enriching }: {
+function OverviewTab({ lead, onReenrich, enriching, onDeepEnrich, deepEnriching, deepEnrichMsg }: {
   lead: Lead
   onReenrich: () => void
   enriching: boolean
+  onDeepEnrich?: () => void
+  deepEnriching?: boolean
+  deepEnrichMsg?: string
 }) {
   const phones = [lead.phone_1, lead.phone_2, lead.phone_3, lead.phone_4, lead.phone_5].filter(Boolean)
 
   return (
     <div className="space-y-5">
-      {/* Property Photo + Map */}
-      <PropertyMedia lead={lead} />
+      {/* Property Details + Map side-by-side */}
+      <div className="flex flex-col md:flex-row gap-5 items-start">
+        {/* Left: Property Details */}
+        <div className="flex-1 min-w-0 rounded-2xl p-5" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+          <h3 className="text-sm font-bold uppercase tracking-wider mb-4" style={{ color: 'var(--c-text-2)' }}>Property Details</h3>
+          <div className="grid grid-cols-2 gap-3 mb-5">
+            <Tile label="Beds" value={lead.beds ?? '—'} />
+            <Tile label="Baths" value={lead.baths ?? '—'} />
+            <Tile label="Sqft" value={lead.living_area ? Number(lead.living_area).toLocaleString() : '—'} sub="living area" />
+            <Tile label="Year Built" value={lead.year_built ?? '—'} />
+            {lead.lot_size && <Tile label="Lot Size" value={Number(lead.lot_size).toLocaleString()} sub="sqft" />}
+            {lead.property_type && <Tile label="Type" value={lead.property_type} />}
+            {lead.subdivision_name && <Tile label="Subdivision" value={lead.subdivision_name} />}
+            <Tile
+              label="Occupancy"
+              value={lead.homestead ? 'Owner-Occupied' : lead.vacant ? 'Vacant' : 'Unknown'}
+              color={lead.homestead ? '#4CAF9A' : lead.vacant ? '#E07B6A' : '#9ca3af'}
+            />
+          </div>
+          <div>
+            <InfoRow label="Property Address" value={lead.property_address} />
+            <InfoRow label="City / State / ZIP" value={`${lead.city || ''}${lead.city && lead.zip ? ', ' : ''}${lead.zip ? `FL ${lead.zip}` : ''}`} />
+            <InfoRow label="County" value={COUNTY_LABELS[lead.county] ?? lead.county} />
+            {lead.subdivision_name && <InfoRow label="Subdivision" value={lead.subdivision_name} />}
+          </div>
+        </div>
 
-      {/* Property Details */}
-      <div className="rounded-2xl p-5" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-        <h3 className="text-sm font-bold uppercase tracking-wider mb-4" style={{ color: 'var(--c-text-2)' }}>Property Details</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
-          <Tile label="Beds" value={lead.beds ?? '—'} />
-          <Tile label="Baths" value={lead.baths ?? '—'} />
-          <Tile label="Sqft" value={lead.living_area ? Number(lead.living_area).toLocaleString() : '—'} sub="living area" />
-          <Tile label="Year Built" value={lead.year_built ?? '—'} />
-          {lead.lot_size && <Tile label="Lot Size" value={Number(lead.lot_size).toLocaleString()} sub="sqft" />}
-          {lead.property_type && <Tile label="Type" value={lead.property_type} />}
-          {lead.subdivision_name && <Tile label="Subdivision" value={lead.subdivision_name} />}
-          <Tile
-            label="Occupancy"
-            value={lead.homestead ? 'Owner-Occupied' : lead.vacant ? 'Vacant' : 'Unknown'}
-            color={lead.homestead ? '#4CAF9A' : lead.vacant ? '#E07B6A' : '#9ca3af'}
+        {/* Right: Map Card */}
+        <div className="w-full md:w-72 shrink-0">
+          <PropertyMapCard
+            address={lead.property_address ?? ''}
+            city={lead.city}
+            zip={lead.zip}
+            county={lead.county}
+            folio={lead.folio_number}
           />
         </div>
-
-        <div>
-          <InfoRow label="Property Address" value={lead.property_address} />
-          <InfoRow label="City / State / ZIP" value={`${lead.city || ''}${lead.city && lead.zip ? ', ' : ''}${lead.zip ? `FL ${lead.zip}` : ''}`} />
-          <InfoRow label="County" value={COUNTY_LABELS[lead.county] ?? lead.county} />
-          {lead.subdivision_name && <InfoRow label="Subdivision" value={lead.subdivision_name} />}
-        </div>
       </div>
+
+      {/* Data Source badge + Deep Enrich button */}
+      {(lead.enrichment_src || lead.enriched_at) && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl px-4 py-3"
+          style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-semibold" style={{ color: 'var(--c-text-2)' }}>
+              {lead.enrichment_src === 'miami-dade-pa' ? 'Miami-Dade Property Appraiser'
+                : lead.enrichment_src === 'broward-pa'    ? 'Broward County Property Appraiser'
+                : lead.enrichment_src === 'palm-beach-pa' ? 'Palm Beach County Property Appraiser'
+                : lead.enrichment_src === 'reapi'         ? 'RealEstateAPI.com'
+                : lead.enrichment_src ?? 'Property Appraiser'}
+            </span>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+              style={{
+                backgroundColor: lead.enrichment_src === 'reapi'
+                  ? 'rgba(107,189,224,0.15)' : 'rgba(76,175,154,0.15)',
+                color: lead.enrichment_src === 'reapi' ? '#6ABDE0' : '#4CAF9A',
+              }}>
+              {lead.enrichment_src === 'reapi' ? 'Paid' : 'Public'}
+            </span>
+            {lead.enriched_at && (
+              <span className="text-[10px]" style={{ color: 'var(--c-text-3)' }}>
+                · updated {new Date(lead.enriched_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+              </span>
+            )}
+          </div>
+          {lead.enrichment_src !== 'reapi' && onDeepEnrich && (
+            <div className="flex items-center gap-2">
+              {deepEnrichMsg && (
+                <span className="text-[10px]"
+                  style={{ color: deepEnrichMsg.startsWith('Enriched') || deepEnrichMsg.startsWith('✓') ? '#4CAF9A' : '#E07B6A' }}>
+                  {deepEnrichMsg}
+                </span>
+              )}
+              <button
+                onClick={onDeepEnrich}
+                disabled={deepEnriching}
+                className="text-xs font-bold px-3 py-1.5 rounded-lg transition-opacity hover:opacity-80 disabled:opacity-50"
+                style={{ backgroundColor: 'rgba(107,189,224,0.15)', color: '#6ABDE0', border: '1px solid rgba(107,189,224,0.3)' }}>
+                {deepEnriching ? '…' : 'Deep Enrich'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Valuation */}
       <div className="rounded-2xl p-5" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
@@ -430,9 +547,10 @@ function OverviewTab({ lead, onReenrich, enriching }: {
 
 // ─── Foreclosure Tab ──────────────────────────────────────────────────────────
 
-function ForeclosureTab({ lead }: { lead: Lead }) {
+function ForeclosureTab({ lead, propertyId }: { lead: Lead; propertyId: string }) {
   const ds   = daysSince(lead.file_date)
   const dClr = distressColor(ds)
+  const [caseNumber, setCaseNumber] = useState<string | null>(lead.case_number ?? null)
 
   const countyLinks: Record<string, string> = {
     'miami-dade': 'https://www.miami-dadeclerk.com/ocs/CaseSearch.aspx',
@@ -477,7 +595,11 @@ function ForeclosureTab({ lead }: { lead: Lead }) {
       {/* Case Details */}
       <div className="rounded-2xl p-5" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
         <h3 className="text-sm font-bold uppercase tracking-wider mb-4" style={{ color: 'var(--c-text-2)' }}>Case Details</h3>
-        <InfoRow label="Case Number"   value={lead.case_number} />
+        <CaseNumberRow
+          propertyId={propertyId}
+          initialValue={caseNumber}
+          onSaved={val => setCaseNumber(val)}
+        />
         <InfoRow label="Folio / APN"   value={lead.folio_number} />
         <InfoRow label="Date Filed"    value={lead.file_date ? new Date(lead.file_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : null} />
         <InfoRow label="Case Type"     value={lead.foreclosure_type === 'P' ? 'Pre-Foreclosure (Lis Pendens)' : lead.foreclosure_type} />
@@ -569,110 +691,343 @@ function MortgageTab({ lead }: { lead: Lead }) {
 
 // ─── Comps Tab ────────────────────────────────────────────────────────────────
 
+interface MlsComp {
+  mls_number:    string | null
+  address:       string
+  city:          string
+  status:        string
+  beds:          number | null
+  baths:         number | null
+  living_area:   number | null
+  year_built:    number | null
+  list_price:    number | null
+  sold_price:    number | null
+  price_per_sqft: number | null
+  sold_date:     string | null
+  list_date:     string | null
+  days_on_market: number | null
+  distance_miles: number | null
+}
+
+interface MlsCompsResult {
+  sold:               MlsComp[]
+  active:             MlsComp[]
+  pending:            MlsComp[]
+  median_sold_price:  number | null
+  avg_price_per_sqft: number | null
+  radius_miles:       number
+  fetched_at:         string
+}
+
 function CompsTab({ lead, comps }: { lead: Lead; comps: Comp[] }) {
-  if (comps.length === 0) {
+  const [mlsComps,   setMlsComps]   = useState<MlsCompsResult | null>(null)
+  const [mlsLoading, setMlsLoading] = useState(false)
+  const [mlsError,   setMlsError]   = useState<string | null>(null)
+  const [mlsRadius,  setMlsRadius]  = useState(0.5)
+  const [noCredentials, setNoCredentials] = useState(false)
+
+  const fetchMlsComps = async (radiusMi = mlsRadius) => {
+    const addrFull = [lead.property_address, lead.city, lead.state, lead.zip].filter(Boolean).join(', ')
+    if (!addrFull) return
+    setMlsLoading(true)
+    setMlsError(null)
+    try {
+      const params = new URLSearchParams({ address: addrFull, radius: String(radiusMi) })
+      if (lead.beds)        params.set('beds', String(lead.beds))
+      if (lead.living_area) params.set('sqft', String(lead.living_area))
+      const res  = await fetch(`/api/mls/comps?${params}`)
+      const data = await res.json()
+      if (!res.ok) {
+        if (data.code === 'NO_CREDENTIALS') setNoCredentials(true)
+        else setMlsError(data.error ?? 'Failed to fetch comps')
+      } else {
+        setMlsComps(data as MlsCompsResult)
+      }
+    } catch {
+      setMlsError('Network error — please try again')
+    } finally {
+      setMlsLoading(false)
+    }
+  }
+
+  // Auto-fetch on mount when no DB comps (non-blocking)
+  useEffect(() => {
+    if (comps.length === 0) fetchMlsComps()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ── DB comps still take priority if present ───────────────────────────────
+  if (comps.length > 0) {
+    const sold    = comps.filter(c => c.status === 'sold')
+    const active  = comps.filter(c => c.status === 'active')
+    const pending = comps.filter(c => c.status === 'pending')
+    const avgSold = sold.length > 0
+      ? sold.reduce((s, c) => s + (c.sale_price ?? 0), 0) / sold.length : null
+
     return (
       <div className="space-y-5">
-        <div className="rounded-2xl p-8 text-center" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-          <div className="w-12 h-12 rounded-xl mx-auto mb-4 flex items-center justify-center"
-            style={{ backgroundColor: 'rgba(123,143,212,0.1)' }}>
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: '#7B8FD4' }}>
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
-            </svg>
+        {avgSold && (
+          <div className="grid grid-cols-3 gap-3">
+            <Tile label="Avg Sold Price" value={fmtK(avgSold)} color="#4CAF9A" />
+            <Tile label="Sold Comps"     value={String(sold.length)} />
+            <Tile label="Active"         value={String(active.length)} />
           </div>
-          <p className="font-bold text-sm mb-1" style={{ color: 'var(--c-primary)' }}>Comps Not Yet Fetched</p>
-          <p className="text-sm mb-4" style={{ color: 'var(--c-text-2)' }}>
-            Comparable sales data will be available once Rentcast is connected.
-          </p>
-          <div className="text-left max-w-sm mx-auto rounded-xl p-4" style={{ backgroundColor: 'var(--c-card-alt)', border: '1px solid var(--c-border)' }}>
-            <p className="text-xs font-bold mb-2" style={{ color: 'var(--c-text-2)' }}>Reference Points</p>
-            <div className="space-y-1.5">
-              {lead.market_value && (
-                <div className="flex justify-between text-xs">
-                  <span style={{ color: 'var(--c-text-2)' }}>Market Value (Assessed)</span>
-                  <span className="font-bold" style={{ color: 'var(--c-primary)' }}>{fmtK(lead.market_value)}</span>
+        )}
+        {[
+          { label: 'Sold',    items: sold,    color: '#4CAF9A' },
+          { label: 'Active',  items: active,  color: '#C9A84C' },
+          { label: 'Pending', items: pending, color: '#7B8FD4' },
+        ].map(({ label, items, color }) => items.length > 0 && (
+          <div key={label}>
+            <h3 className="text-xs font-bold uppercase tracking-wider mb-3" style={{ color }}>{label} ({items.length})</h3>
+            <div className="space-y-2">
+              {items.map(comp => (
+                <div key={comp.id} className="rounded-xl p-4" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                  <div className="flex items-start justify-between mb-2">
+                    <div>
+                      <p className="text-sm font-semibold" style={{ color: 'var(--c-primary)' }}>{comp.address}</p>
+                      <p className="text-xs mt-0.5" style={{ color: 'var(--c-text-2)' }}>
+                        {comp.beds}bd / {comp.baths}ba
+                        {comp.sqft ? ` · ${Number(comp.sqft).toLocaleString()} sqft` : ''}
+                        {comp.year_built ? ` · ${comp.year_built}` : ''}
+                        {comp.distance_miles ? ` · ${comp.distance_miles}mi` : ''}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-bold" style={{ color }}>{fmtK(comp.sale_price ?? comp.list_price)}</p>
+                      {comp.price_per_sqft && <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>${comp.price_per_sqft}/sqft</p>}
+                    </div>
+                  </div>
+                  {comp.sale_date && (
+                    <p className="text-[11px]" style={{ color: 'var(--c-text-3)' }}>
+                      Sold {new Date(comp.sale_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                    </p>
+                  )}
                 </div>
-              )}
-              {lead.assessed_value && (
-                <div className="flex justify-between text-xs">
-                  <span style={{ color: 'var(--c-text-2)' }}>County Assessed Value</span>
-                  <span className="font-bold" style={{ color: 'var(--c-text-2)' }}>{fmtK(lead.assessed_value)}</span>
-                </div>
-              )}
-              {lead.living_area && lead.market_value && (
-                <div className="flex justify-between text-xs">
-                  <span style={{ color: 'var(--c-text-2)' }}>Price per Sqft (est.)</span>
-                  <span className="font-bold" style={{ color: '#C9A84C' }}>
-                    ${(Number(lead.market_value) / Number(lead.living_area)).toFixed(0)}/sqft
-                  </span>
-                </div>
-              )}
+              ))}
             </div>
           </div>
-          <p className="text-xs mt-4" style={{ color: 'var(--c-text-3)' }}>
-            Add <code className="px-1 py-0.5 rounded text-[11px]" style={{ backgroundColor: 'var(--c-card-alt)' }}>RENTCAST_API_KEY</code> to env to enable live comps.
+        ))}
+      </div>
+    )
+  }
+
+  // ── MLS live comps ─────────────────────────────────────────────────────────
+
+  // Header row: source badge + radius toggle + refresh
+  const Header = () => (
+    <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-bold uppercase tracking-wider" style={{ color: 'var(--c-text-2)' }}>
+          Comps
+        </span>
+        <span className="text-[9px] font-bold px-2 py-0.5 rounded-full"
+          style={{ backgroundColor: 'rgba(76,175,154,0.12)', color: '#4CAF9A', border: '1px solid rgba(76,175,154,0.25)' }}>
+          {mlsComps ? (mlsComps as MlsCompsResult & { source?: string }).source === 'rentcast' ? 'Rentcast' : 'Beaches MLS' : 'MLS'}
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        {/* Radius toggle */}
+        <div className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--c-text-3)' }}>
+          {[0.25, 0.5, 1].map(r => (
+            <button key={r}
+              onClick={() => { setMlsRadius(r); fetchMlsComps(r) }}
+              className="px-2 py-0.5 rounded-lg font-bold transition-all"
+              style={{
+                backgroundColor: mlsRadius === r ? 'rgba(201,168,76,0.15)' : 'var(--c-hover)',
+                color:           mlsRadius === r ? '#C9A84C' : 'var(--c-text-3)',
+                border:          `1px solid ${mlsRadius === r ? 'rgba(201,168,76,0.35)' : 'var(--c-border)'}`,
+              }}>
+              {r}mi
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => fetchMlsComps()}
+          disabled={mlsLoading}
+          className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all hover:opacity-80"
+          style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+          {mlsLoading
+            ? <><div className="w-3 h-3 border border-t-transparent rounded-full animate-spin" style={{ borderColor: '#C9A84C', borderTopColor: 'transparent' }} /> Fetching…</>
+            : '↻ Refresh'
+          }
+        </button>
+      </div>
+    </div>
+  )
+
+  // Not yet credentialed
+  if (noCredentials) {
+    return (
+      <div className="space-y-5">
+        <Header />
+        <div className="rounded-2xl p-8 text-center" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+          <p className="text-2xl mb-3">🔑</p>
+          <p className="font-bold text-sm mb-1" style={{ color: 'var(--c-primary)' }}>Comps Not Connected</p>
+          <p className="text-sm mb-4" style={{ color: 'var(--c-text-2)' }}>
+            Add a Rentcast API key to pull live comps and active listings.
           </p>
+          <div className="text-left max-w-sm mx-auto rounded-xl p-4 space-y-2 text-xs"
+            style={{ backgroundColor: 'var(--c-card-alt)', border: '1px solid var(--c-border)' }}>
+            <p className="font-bold" style={{ color: 'var(--c-text-2)' }}>How to get your key:</p>
+            <p style={{ color: 'var(--c-text-3)' }}>1. Sign up at <strong>app.rentcast.io</strong></p>
+            <p style={{ color: 'var(--c-text-3)' }}>2. Go to <em>API Keys</em> and generate one</p>
+            <p style={{ color: 'var(--c-text-3)' }}>3. Add to Vercel env vars:</p>
+            <pre className="text-[10px] rounded p-2 mt-1" style={{ backgroundColor: 'var(--c-hover)', color: '#4CAF9A' }}>
+              RENTCAST_API_KEY=your_key_here
+            </pre>
+          </div>
+          {/* Still show PA reference points */}
+          {(lead.market_value || lead.assessed_value) && (
+            <div className="text-left max-w-sm mx-auto rounded-xl p-4 mt-4"
+              style={{ backgroundColor: 'var(--c-card-alt)', border: '1px solid var(--c-border)' }}>
+              <p className="text-xs font-bold mb-2" style={{ color: 'var(--c-text-2)' }}>PA Reference Values</p>
+              <div className="space-y-1.5">
+                {lead.market_value && (
+                  <div className="flex justify-between text-xs">
+                    <span style={{ color: 'var(--c-text-2)' }}>Market Value</span>
+                    <span className="font-bold" style={{ color: 'var(--c-primary)' }}>{fmtK(lead.market_value)}</span>
+                  </div>
+                )}
+                {lead.assessed_value && (
+                  <div className="flex justify-between text-xs">
+                    <span style={{ color: 'var(--c-text-2)' }}>Assessed Value</span>
+                    <span className="font-bold" style={{ color: 'var(--c-text-2)' }}>{fmtK(lead.assessed_value)}</span>
+                  </div>
+                )}
+                {lead.living_area && lead.market_value && (
+                  <div className="flex justify-between text-xs">
+                    <span style={{ color: 'var(--c-text-2)' }}>Est. $/sqft</span>
+                    <span className="font-bold" style={{ color: '#C9A84C' }}>
+                      ${(Number(lead.market_value) / Number(lead.living_area)).toFixed(0)}/sqft
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     )
   }
 
-  const sold    = comps.filter(c => c.status === 'sold')
-  const active  = comps.filter(c => c.status === 'active')
-  const pending = comps.filter(c => c.status === 'pending')
+  // Loading skeleton
+  if (mlsLoading && !mlsComps) {
+    return (
+      <div className="space-y-4">
+        <Header />
+        {[1,2,3].map(i => (
+          <div key={i} className="rounded-xl h-20 animate-pulse" style={{ backgroundColor: 'var(--c-card)' }} />
+        ))}
+      </div>
+    )
+  }
 
-  const avgSold = sold.length > 0
-    ? sold.reduce((s, c) => s + (c.sale_price ?? 0), 0) / sold.length
-    : null
+  // Error state
+  if (mlsError && !mlsComps) {
+    return (
+      <div className="space-y-4">
+        <Header />
+        <div className="rounded-2xl p-6 text-center" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+          <p className="text-sm font-bold mb-1" style={{ color: '#E74C3C' }}>MLS Error</p>
+          <p className="text-xs mb-4" style={{ color: 'var(--c-text-3)' }}>{mlsError}</p>
+          <button onClick={() => fetchMlsComps()}
+            className="px-4 py-2 rounded-xl text-sm font-bold"
+            style={{ backgroundColor: 'var(--c-primary)', color: '#C9A84C' }}>
+            Try Again
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // No MLS comps result yet (shouldn't normally reach here, but handle gracefully)
+  if (!mlsComps) {
+    return (
+      <div className="space-y-4">
+        <Header />
+        <div className="rounded-2xl p-6 text-center" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+          <p className="text-sm" style={{ color: 'var(--c-text-3)' }}>Click Refresh to pull comps.</p>
+        </div>
+      </div>
+    )
+  }
+
+  const { sold: mlsSold, active: mlsActive, pending: mlsPending,
+          median_sold_price, avg_price_per_sqft } = mlsComps
+  const totalComps = mlsSold.length + mlsActive.length + mlsPending.length
 
   return (
     <div className="space-y-5">
-      {avgSold && (
-        <div className="grid grid-cols-3 gap-3">
-          <Tile label="Avg Sold Price" value={fmtK(avgSold)} color="#4CAF9A" />
-          <Tile label="Sold Comps" value={String(sold.length)} />
-          <Tile label="Active Listings" value={String(active.length)} />
+      <Header />
+
+      {/* Stats */}
+      {totalComps > 0 && (
+        <div className="grid grid-cols-4 gap-3">
+          <Tile label="Median Sold"  value={median_sold_price   ? fmtK(median_sold_price)             : '—'} color="#4CAF9A" />
+          <Tile label="Avg $/sqft"   value={avg_price_per_sqft  ? `$${avg_price_per_sqft}`            : '—'} />
+          <Tile label="Sold Comps"   value={String(mlsSold.length)} />
+          <Tile label="Active"       value={String(mlsActive.length)} />
+        </div>
+      )}
+
+      {totalComps === 0 && (
+        <div className="rounded-2xl p-6 text-center" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+          <p className="text-sm mb-1" style={{ color: 'var(--c-text-3)' }}>No comps found within {mlsRadius}mi</p>
+          <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>Try expanding the radius above</p>
         </div>
       )}
 
       {[
-        { label: 'Sold', items: sold, color: '#4CAF9A' },
-        { label: 'Active', items: active, color: '#C9A84C' },
-        { label: 'Pending', items: pending, color: '#7B8FD4' },
-      ].map(({ label, items, color }) => items.length > 0 && (
+        { label: 'Sold',    items: mlsSold,    color: '#4CAF9A', priceKey: 'sold_price'  as const },
+        { label: 'Active',  items: mlsActive,  color: '#C9A84C', priceKey: 'list_price'  as const },
+        { label: 'Pending', items: mlsPending, color: '#7B8FD4', priceKey: 'list_price'  as const },
+      ].map(({ label, items, color, priceKey }) => items.length > 0 && (
         <div key={label}>
           <h3 className="text-xs font-bold uppercase tracking-wider mb-3" style={{ color }}>
             {label} ({items.length})
           </h3>
           <div className="space-y-2">
-            {items.map(comp => (
-              <div key={comp.id} className="rounded-xl p-4" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-                <div className="flex items-start justify-between mb-2">
-                  <div>
-                    <p className="text-sm font-semibold" style={{ color: 'var(--c-primary)' }}>{comp.address}</p>
+            {items.map((comp, i) => (
+              <div key={comp.mls_number ?? i}
+                className="rounded-xl p-4" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                <div className="flex items-start justify-between mb-1.5">
+                  <div className="min-w-0 flex-1 pr-3">
+                    <p className="text-sm font-semibold" style={{ color: 'var(--c-primary)' }}>
+                      {comp.address}{comp.city ? `, ${comp.city}` : ''}
+                    </p>
                     <p className="text-xs mt-0.5" style={{ color: 'var(--c-text-2)' }}>
-                      {comp.beds}bd / {comp.baths}ba
-                      {comp.sqft ? ` · ${Number(comp.sqft).toLocaleString()} sqft` : ''}
-                      {comp.year_built ? ` · ${comp.year_built}` : ''}
-                      {comp.distance_miles ? ` · ${comp.distance_miles}mi` : ''}
+                      {[
+                        comp.beds        ? `${comp.beds}bd`                          : null,
+                        comp.baths       ? `${comp.baths}ba`                         : null,
+                        comp.living_area ? `${comp.living_area.toLocaleString()} sf` : null,
+                        comp.year_built  ? `${comp.year_built}`                      : null,
+                        comp.distance_miles ? `${comp.distance_miles}mi`             : null,
+                      ].filter(Boolean).join(' · ')}
                     </p>
                   </div>
-                  <div className="text-right">
-                    <p className="text-sm font-bold" style={{ color }}>
-                      {fmtK(comp.sale_price ?? comp.list_price)}
-                    </p>
+                  <div className="text-right shrink-0">
+                    <p className="text-sm font-bold" style={{ color }}>{fmtK(comp[priceKey])}</p>
                     {comp.price_per_sqft && (
-                      <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>
-                        ${comp.price_per_sqft}/sqft
-                      </p>
+                      <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>${comp.price_per_sqft}/sf</p>
                     )}
                   </div>
                 </div>
-                {comp.sale_date && (
-                  <p className="text-[11px]" style={{ color: 'var(--c-text-3)' }}>
-                    Sold {new Date(comp.sale_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                  </p>
-                )}
+                <div className="flex items-center gap-3 mt-1">
+                  {comp.sold_date && (
+                    <p className="text-[11px]" style={{ color: 'var(--c-text-3)' }}>
+                      Sold {new Date(comp.sold_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                    </p>
+                  )}
+                  {comp.days_on_market != null && (
+                    <p className="text-[11px]" style={{ color: 'var(--c-text-3)' }}>
+                      {comp.days_on_market}d on market
+                    </p>
+                  )}
+                  {comp.mls_number && (
+                    <p className="text-[10px] font-mono" style={{ color: 'var(--c-text-3)' }}>MLS#{comp.mls_number}</p>
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -1112,6 +1467,8 @@ export default function LeadDetailClient({
   const [pipelineMsg, setPipelineMsg] = useState('')
   const [enriching, setEnriching]     = useState(false)
   const [enrichMsg, setEnrichMsg]     = useState('')
+  const [deepEnriching, setDeepEnriching] = useState(false)
+  const [deepEnrichMsg, setDeepEnrichMsg] = useState('')
 
   // Defined early so useEffect below can reference it
   // silent=true suppresses error messages (used for auto-enrich on mount)
@@ -1134,6 +1491,28 @@ export default function LeadDetailClient({
     }
     setTimeout(() => setEnrichMsg(''), 5000)
     setEnriching(false)
+  }
+
+  const deepEnrichLead = async () => {
+    const propertyId = lead.property_id ?? lead.id
+    if (!propertyId) return
+    setDeepEnriching(true)
+    setDeepEnrichMsg('')
+    try {
+      const res = await fetch(`/api/properties/deep-enrich/${propertyId}`, { method: 'POST' })
+      const data = await res.json()
+      if (res.ok && data.result) {
+        setLead((prev: Lead) => ({ ...prev, ...data.updated, enrichment_src: 'reapi' }))
+        setDeepEnrichMsg(`✓ ${data.fields_updated?.length ?? 0} fields enriched from RealEstateAPI`)
+      } else {
+        setDeepEnrichMsg(data.error ?? 'Deep enrich failed')
+      }
+    } catch {
+      setDeepEnrichMsg('Deep enrich request failed')
+    } finally {
+      setDeepEnriching(false)
+      setTimeout(() => setDeepEnrichMsg(''), 6000)
+    }
   }
 
   // Auto-enrich Miami-Dade leads silently on first open
@@ -1419,8 +1798,8 @@ export default function LeadDetailClient({
 
       {/* ── Tab Content ── */}
       <div className="flex-1 overflow-y-auto px-4 md:px-8 py-5">
-        {tab === 'overview'       && <OverviewTab lead={lead} onReenrich={() => enrichLead(true)} enriching={enriching} />}
-        {tab === 'foreclosure'    && <ForeclosureTab lead={lead} />}
+        {tab === 'overview'       && <OverviewTab lead={lead} onReenrich={() => enrichLead(true)} enriching={enriching} onDeepEnrich={deepEnrichLead} deepEnriching={deepEnriching} deepEnrichMsg={deepEnrichMsg} />}
+        {tab === 'foreclosure'    && <ForeclosureTab lead={lead} propertyId={lead.property_id ?? lead.id} />}
         {tab === 'mortgage'       && <MortgageTab lead={lead} />}
         {tab === 'comps'          && <CompsTab lead={lead} comps={comps} />}
         {tab === 'communications' && (

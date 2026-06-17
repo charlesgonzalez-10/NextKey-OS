@@ -1,15 +1,13 @@
 import { createClient } from '@/lib/supabase/server'
-import { createClient as createServiceClient } from '@supabase/supabase-js'
+import { serviceClient } from '@/lib/supabase-service'
 import { redirect, notFound } from 'next/navigation'
 import DashboardLayout from '../../layout-dashboard'
 import LeadDetailClient from './lead-detail-client'
 
 export const dynamic = 'force-dynamic'
 
-const service = createServiceClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+// serviceClient is a lazy Proxy — createClient only runs at first request-time access
+const service = serviceClient
 
 export default async function LeadDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const supabase = await createClient()

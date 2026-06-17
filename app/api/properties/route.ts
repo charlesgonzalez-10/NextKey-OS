@@ -24,14 +24,12 @@
  *                low_equity, free_clear, llc_corp, trust, individual, owner_occupied)
  */
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { serviceClient } from '@/lib/supabase-service'
 
 export const dynamic = 'force-dynamic'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+// serviceClient is a lazy Proxy — no createClient call at module eval time
+const supabase = serviceClient
 
 export async function GET(req: NextRequest) {
   const p = req.nextUrl.searchParams

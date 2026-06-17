@@ -72,18 +72,26 @@ const COLUMN_PATTERNS = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function yesterdayMMDDYYYY(): string {
+/** Returns last business day (Mon–Fri) as MM/DD/YYYY */
+function lastBusinessDayMMDDYYYY(): string {
   const d = new Date()
-  d.setDate(d.getDate() - 1)
+  d.setDate(d.getDate() - 1)           // start at yesterday
+  const dow = d.getDay()               // 0=Sun, 6=Sat
+  if (dow === 0) d.setDate(d.getDate() - 2)  // Sunday  → back to Friday
+  if (dow === 6) d.setDate(d.getDate() - 1)  // Saturday → back to Friday
   const m   = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
   const y   = d.getFullYear()
   return `${m}/${day}/${y}`
 }
 
-function yesterdayISO(): string {
+/** Returns last business day (Mon–Fri) as YYYY-MM-DD */
+function lastBusinessDayISO(): string {
   const d = new Date()
-  d.setDate(d.getDate() - 1)
+  d.setDate(d.getDate() - 1)           // start at yesterday
+  const dow = d.getDay()               // 0=Sun, 6=Sat
+  if (dow === 0) d.setDate(d.getDate() - 2)  // Sunday  → back to Friday
+  if (dow === 6) d.setDate(d.getDate() - 1)  // Saturday → back to Friday
   return d.toISOString().slice(0, 10)
 }
 
@@ -169,8 +177,8 @@ export class PalmBeachORAdapter implements CountyAdapter {
   }
 
   private async _fetch(): Promise<AdapterResult> {
-    const yesterday    = yesterdayMMDDYYYY()
-    const yesterdayISO = yesterdayMMDDYYYY().split('/').join('-').replace(/^(\d{2})-(\d{2})-(\d{4})$/, '$3-$1-$2')
+    const yesterday    = lastBusinessDayMMDDYYYY()
+    const yesterdayISO = lastBusinessDayISO()
     const source       = `PBC-Landmark:${yesterdayISO}`
 
     // ── Strategy 1: Try the JSON endpoint (faster, more reliable) ────────────

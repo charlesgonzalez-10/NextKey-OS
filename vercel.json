@@ -5,8 +5,8 @@
       "schedule": "0 7 * * 0"
     },
     {
-      "path": "/api/cron/ingest-distress",
-      "schedule": "0 13 * * 1-5"
+      "path": "/api/cron/refresh-saved",
+      "schedule": "0 14 * * 1-5"
     }
   ]
 }

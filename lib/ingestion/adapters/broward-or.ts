@@ -72,12 +72,15 @@ const BROWARD_COLS = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Returns YYYYMMDD for yesterday in local time */
-function yesterdayYYYYMMDD(): string {
+/** Returns YYYYMMDD for the last business day (Mon–Fri) in local time */
+function lastBusinessDayYYYYMMDD(): string {
   const d = new Date()
-  d.setDate(d.getDate() - 1)
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
+  d.setDate(d.getDate() - 1)           // start at yesterday
+  const dow = d.getDay()               // 0=Sun, 6=Sat
+  if (dow === 0) d.setDate(d.getDate() - 2)  // Sunday  → back to Friday
+  if (dow === 6) d.setDate(d.getDate() - 1)  // Saturday → back to Friday
+  const y   = d.getFullYear()
+  const m   = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}${m}${day}`
 }
@@ -148,7 +151,7 @@ export class BrowardORAdapter implements CountyAdapter {
   }
 
   private async _fetch(): Promise<AdapterResult> {
-    const dateStr  = yesterdayYYYYMMDD()
+    const dateStr  = lastBusinessDayYYYYMMDD()
     const fileName = `OR_${dateStr}.txt`
     const sftp     = new SftpClient('broward-or-adapter')
 
@@ -158,20 +161,30 @@ export class BrowardORAdapter implements CountyAdapter {
     try {
       await sftp.connect(SFTP_CONFIG)
 
-      // List directory to confirm the file exists (handles naming variants)
-      const listing = await sftp.list('/')
-      const target  = listing.find(
-        f => f.type === '-' && (
-          f.name === fileName ||
-          f.name === `OR_${dateStr}.TXT` ||
-          f.name === `BCPUB_${dateStr}.txt` ||
-          f.name === `BCPUB_${dateStr}.TXT`
-        )
-      )
+      // Try multiple directories — Broward's SFTP root layout can vary
+      const SEARCH_PATHS = ['/', '/OR/', '/ORIndex/', '/data/', '/public/']
+      let target: { name: string; path: string } | undefined
+
+      for (const dir of SEARCH_PATHS) {
+        let listing: Awaited<ReturnType<typeof sftp.list>>
+        try { listing = await sftp.list(dir) } catch { continue }
+
+        const variants = [
+          fileName,
+          `OR_${dateStr}.TXT`,
+          `BCPUB_${dateStr}.txt`,
+          `BCPUB_${dateStr}.TXT`,
+        ]
+        const found = listing.find(f => f.type === '-' && variants.includes(f.name))
+        if (found) {
+          target = { name: found.name, path: `${dir}${found.name}` }
+          console.log(`[Broward OR] Found ${found.name} in ${dir}`)
+          break
+        }
+        console.log(`[Broward OR] dir=${dir} — ${listing.filter(f=>f.type==='-').length} files, no match for ${dateStr}`)
+      }
 
       if (!target) {
-        console.warn(`[Broward OR] No index file found for ${dateStr}. Available files:`,
-          listing.filter(f => f.type === '-').map(f => f.name).slice(0, 10))
         await sftp.end()
         return {
           county: 'broward', records: [], fetched: 0, filtered: 0,
@@ -182,7 +195,7 @@ export class BrowardORAdapter implements CountyAdapter {
       // Stream file into memory. OR index files are large-ish but manageable
       // (~5–50 MB for a busy day). If size ever becomes a concern, switch to
       // createReadStream + readline for line-by-line processing.
-      const buffer = await sftp.get(`/${target.name}`)
+      const buffer = await sftp.get(target.path)
       fileContent  = buffer.toString('utf-8')
     } catch (err) {
       const msg = `SFTP connection/read failed: ${String(err)}`
