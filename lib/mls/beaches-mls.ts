@@ -120,6 +120,8 @@ export interface CompsResult {
   source:             'beaches-mls' | 'rentcast'
   radius_miles:       number
   fetched_at:         string
+  subject_lat?:       number
+  subject_lng?:       number
 }
 
 // ─── Geo helpers ──────────────────────────────────────────────────────────────
@@ -199,6 +201,8 @@ function sparkToComp(
     days_on_market:  l.DaysOnMarket ?? null,
     rent_amount:     null,
     distance_miles:  dist,
+    lat:             l.Latitude  ?? null,
+    lng:             l.Longitude ?? null,
   }
 }
 
@@ -295,6 +299,8 @@ export async function fetchComps(
     source:             'beaches-mls',
     radius_miles:       radiusMi,
     fetched_at:         new Date().toISOString(),
+    subject_lat:        lat,
+    subject_lng:        lng,
   }
 }
 

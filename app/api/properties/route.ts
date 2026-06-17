@@ -62,6 +62,8 @@ export async function GET(req: NextRequest) {
   const ai_score_min     = p.get('ai_score_min') ? parseInt(p.get('ai_score_min')!, 10) : null
   const lead_types_raw   = p.get('lead_types') || ''
   const lead_types       = lead_types_raw ? lead_types_raw.split(',').filter(Boolean) : []
+  const imported         = p.get('imported')      // 'true' = has imported_to_contact
+  const blocked          = p.get('blocked')        // 'true' = blocked=true
   const record_type      = p.get('record_type') || ''   // tab filter: lp | probate | auction | tax_deed | divorce
 
   const beds_min   = p.get('beds_min')   ? parseInt(p.get('beds_min')!, 10)   : null
@@ -106,6 +108,8 @@ export async function GET(req: NextRequest) {
       is_probate, is_tax_deed, is_divorce,
       free_clear, high_equity,
       folio_number, owner_name, property_address, city, zip,
+      owner_state, owner_zip, owner_city, mailing_address, auction_date,
+      unit_number, num_units,
       beds, baths, year_built, living_area, lot_size,
       assessed_value, market_value, equity_percentage,
       equity_dollar_amount, equity_tier, known_debt,
@@ -235,7 +239,7 @@ export async function GET(req: NextRequest) {
   if (propIds.length > 0) {
     const { data: leadsData } = await supabase
       .from('leads')
-      .select('property_id, id, status, pipeline_stage, starred, lead_score, ai_score, imported_to_contact, source')
+      .select('property_id, id, status, pipeline_stage, starred, lead_score, ai_score, imported_to_contact, source, notes, call_status, sms_status, email_status, offer_sent, offer_pct, offer_amount, blocked, created_at')
       .in('property_id', propIds)
 
     if (leadsData) {
@@ -255,6 +259,15 @@ export async function GET(req: NextRequest) {
       lead_score:          lead?.lead_score       ?? null,
       ai_score:            lead?.ai_score         ?? null,
       imported_to_contact: lead?.imported_to_contact ?? null,
+      lead_notes:          lead?.notes              ?? null,
+      call_status:         lead?.call_status         ?? 'not_called',
+      sms_status:          lead?.sms_status          ?? 'not_sent',
+      email_status:        lead?.email_status        ?? 'not_sent',
+      offer_sent:          lead?.offer_sent          ?? false,
+      offer_pct:           lead?.offer_pct           ?? null,
+      offer_amount:        lead?.offer_amount        ?? null,
+      blocked:             lead?.blocked             ?? false,
+      lead_added_at:       lead?.created_at          ?? null,
       is_lead:             !!lead,
     }
   })
@@ -276,9 +289,19 @@ export async function GET(req: NextRequest) {
     merged = merged.filter(r => !!r.pipeline_stage)
   }
 
-  // Starred filter (from leads)
+  // Starred / Following filter
   if (starred === 'true') {
     merged = merged.filter(r => r.starred === true)
+  }
+
+  // Imported = has a linked contact
+  if (imported === 'true') {
+    merged = merged.filter(r => !!r.imported_to_contact)
+  }
+
+  // Blocked filter
+  if (blocked === 'true') {
+    merged = merged.filter(r => r.blocked === true || r.pipeline_stage === 'blocked')
   }
 
   // AI score min (from leads)

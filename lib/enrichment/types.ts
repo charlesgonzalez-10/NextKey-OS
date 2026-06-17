@@ -124,6 +124,10 @@ export interface PropertyComp {
   rent_amount:      number | null     // monthly rent (if rental comp)
 
   distance_miles:   number | null     // distance from subject property
+
+  // Coordinates — populated by MLS adapters, used for map rendering
+  lat?:             number | null
+  lng?:             number | null
 }
 
 // ─── Market stats (aggregate) ─────────────────────────────────────────────────

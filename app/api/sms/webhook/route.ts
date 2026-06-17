@@ -1,4 +1,4 @@
-import { createClient } from '@/lib/supabase/server'
+import { serviceClient } from '@/lib/supabase-service'
 import { NextRequest, NextResponse } from 'next/server'
 
 function normalizePhone(raw: string): string {
@@ -22,13 +22,13 @@ export async function POST(req: NextRequest) {
     return new NextResponse('<Response/>', { headers: { 'Content-Type': 'text/xml' } })
   }
 
-  const supabase = await createClient()
+  const service = serviceClient
 
-  // Find contact by phone — try several normalizations
+  // Find contact by phone
   const fromNorm = normalizePhone(fromRaw)
   const digits10 = fromNorm.replace(/\D/g, '').slice(-10)
 
-  const { data: contacts } = await supabase
+  const { data: contacts } = await service
     .from('contacts')
     .select('id, name, phone')
 
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
     return cd === digits10
   })
 
-  const { error } = await supabase.from('messages').insert({
+  const { error } = await service.from('messages').insert({
     contact_id: contact?.id ?? null,
     direction: 'inbound',
     body: msgBody,

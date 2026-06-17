@@ -18,6 +18,25 @@ export const dynamic = 'force-dynamic'
 
 const service = serviceClient
 
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const { id } = await params
+
+  // Delete lead row first (FK to properties)
+  await service.from('leads').delete().eq('property_id', id)
+  // Delete the property (cascades to lead_notes, lead_ai_summaries, etc.)
+  const { error } = await service.from('properties').delete().eq('id', id)
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  return NextResponse.json({ deleted: id })
+}
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -89,6 +108,9 @@ export async function GET(
     ai_score:            lead?.ai_score         ?? property.ai_score ?? null,
     imported_to_contact: lead?.imported_to_contact ?? property.imported_to_contact ?? null,
     is_lead:             !!lead,
+    // Classification fields (stored on leads table)
+    lead_type_id:        lead?.lead_type_id  ?? null,
+    vertical_id:         lead?.vertical_id   ?? null,
   }
 
   return NextResponse.json({

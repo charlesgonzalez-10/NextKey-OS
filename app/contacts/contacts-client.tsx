@@ -1,12 +1,57 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
 import ColumnPicker, { useColumnPrefs, ColumnDef } from '@/components/ColumnPicker'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 const CATEGORIES = ['All', 'Seller', 'Buyer', 'Investor', 'Wholesaler', 'Agent', 'Lender', 'Other']
 const STATUSES   = ['Active', 'Inactive', 'Closed', 'Follow-up']
+
+// ─── Contact Views ────────────────────────────────────────────────────────────
+
+interface ContactView {
+  id: string
+  name: string
+  category: string
+  status: string
+  source: string
+  tag: string
+  due: '' | 'today' | 'week' | 'overdue'
+  isPreset?: boolean
+}
+
+const PRESET_CONTACT_VIEWS: ContactView[] = [
+  { id: 'preset-all',      name: 'All Contacts',         category: 'All',       status: '', source: '', tag: '', due: '',       isPreset: true },
+  { id: 'preset-buyers',   name: 'Buyers',               category: 'Buyer',     status: '', source: '', tag: '', due: '',       isPreset: true },
+  { id: 'preset-sellers',  name: 'Sellers',              category: 'Seller',    status: '', source: '', tag: '', due: '',       isPreset: true },
+  { id: 'preset-investors',name: 'Investors',            category: 'Investor',  status: '', source: '', tag: '', due: '',       isPreset: true },
+  { id: 'preset-due-today',name: 'Follow-Up Due Today',  category: 'All',       status: '', source: '', tag: '', due: 'today',  isPreset: true },
+  { id: 'preset-overdue',  name: 'Overdue Follow-Ups',   category: 'All',       status: '', source: '', tag: '', due: 'overdue',isPreset: true },
+  { id: 'preset-active',   name: 'Active Contacts',      category: 'All',       status: 'Active', source: '', tag: '', due: '', isPreset: true },
+]
+
+const LS_VIEWS_KEY   = 'nk_contact_views'
+const LS_DEFAULT_KEY = 'nk_contact_default_view'
+
+function loadContactViews(): ContactView[] {
+  try { const s = localStorage.getItem(LS_VIEWS_KEY); return s ? JSON.parse(s) : [] } catch { return [] }
+}
+function saveContactViews(views: ContactView[]) {
+  try { localStorage.setItem(LS_VIEWS_KEY, JSON.stringify(views)) } catch { /* noop */ }
+}
+function loadDefaultViewId(): string | null {
+  try { return localStorage.getItem(LS_DEFAULT_KEY) } catch { return null }
+}
+function getInitialViewState(): ContactView | null {
+  try {
+    const id = localStorage.getItem(LS_DEFAULT_KEY)
+    if (!id) return null
+    const saved: ContactView[] = JSON.parse(localStorage.getItem(LS_VIEWS_KEY) ?? '[]')
+    return [...PRESET_CONTACT_VIEWS, ...saved].find(v => v.id === id) ?? null
+  } catch { return null }
+}
 
 const categoryColors: Record<string, string> = {
   Seller: '#4CAF9A', Buyer: '#7B8FD4', Investor: '#C9A84C',
@@ -75,13 +120,28 @@ const DEFAULT_WIDTHS: Record<AnyCol, number> = {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function ContactsClient({ contacts }: { contacts: Contact[] }) {
+  const router = useRouter()
+  const initView = typeof window !== 'undefined' ? getInitialViewState() : null
+
+  const [localContacts, setLocalContacts] = useState(contacts)
+  const [selected, setSelected]           = useState<Set<string>>(new Set())
+  const [bulkUpdating, setBulkUpdating]   = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState(false)
+  const [deleting, setDeleting]           = useState(false)
+
   const [search, setSearch]             = useState('')
-  const [activeCategory, setActiveCategory] = useState('All')
-  const [filterStatus, setFilterStatus] = useState('')
-  const [filterSource, setFilterSource] = useState('')
-  const [filterTag, setFilterTag]       = useState('')
-  const [filterDue, setFilterDue]       = useState<'' | 'today' | 'week' | 'overdue'>('')
+  const [activeCategory, setActiveCategory] = useState(initView?.category ?? 'All')
+  const [filterStatus, setFilterStatus] = useState(initView?.status ?? '')
+  const [filterSource, setFilterSource] = useState(initView?.source ?? '')
+  const [filterTag, setFilterTag]       = useState(initView?.tag ?? '')
+  const [filterDue, setFilterDue]       = useState<'' | 'today' | 'week' | 'overdue'>(initView?.due ?? '')
   const [showFilters, setShowFilters]   = useState(false)
+
+  const [savedViews, setSavedViews]         = useState<ContactView[]>(() => typeof window !== 'undefined' ? loadContactViews() : [])
+  const [defaultViewId, setDefaultViewId]   = useState<string | null>(() => typeof window !== 'undefined' ? loadDefaultViewId() : null)
+  const [viewMenuOpen, setViewMenuOpen]     = useState(false)
+  const [saveViewOpen, setSaveViewOpen]     = useState(false)
+
   const { visible, toggle, reset, isVisible } = useColumnPrefs('contacts', COLUMNS)
 
   // ── Column widths ──────────────────────────────────────────────────────────
@@ -116,11 +176,104 @@ export default function ContactsClient({ contacts }: { contacts: Contact[] }) {
     document.addEventListener('mouseup', onUp)
   }
 
-  // Derived: unique tags + sources from loaded contacts
-  const allTags    = [...new Set(contacts.flatMap(c => c.tags || []))].sort()
-  const allSources = [...new Set(contacts.map(c => c.source).filter(Boolean))].sort()
+  // ── View handlers ──────────────────────────────────────────────────────────
+  const applyView = (v: ContactView) => {
+    setActiveCategory(v.category)
+    setFilterStatus(v.status)
+    setFilterSource(v.source)
+    setFilterTag(v.tag)
+    setFilterDue(v.due)
+    setViewMenuOpen(false)
+  }
 
-  const dueCount = contacts.filter(c => {
+  const saveView = (name: string) => {
+    const view: ContactView = {
+      id: crypto.randomUUID(), name,
+      category: activeCategory, status: filterStatus,
+      source: filterSource, tag: filterTag, due: filterDue,
+    }
+    const next = [...savedViews, view]
+    setSavedViews(next)
+    saveContactViews(next)
+  }
+
+  const deleteView = (id: string) => {
+    const next = savedViews.filter(v => v.id !== id)
+    setSavedViews(next)
+    saveContactViews(next)
+    if (defaultViewId === id) {
+      localStorage.removeItem(LS_DEFAULT_KEY)
+      setDefaultViewId(null)
+    }
+  }
+
+  const setDefaultView = (id: string) => {
+    localStorage.setItem(LS_DEFAULT_KEY, id)
+    setDefaultViewId(id)
+    setViewMenuOpen(false)
+  }
+
+  const removeDefaultView = () => {
+    localStorage.removeItem(LS_DEFAULT_KEY)
+    setDefaultViewId(null)
+  }
+
+  // ── Selection helpers ─────────────────────────────────────────────────────
+
+  const toggleSelect = (id: string) => setSelected(prev => {
+    const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next
+  })
+  const clearSelect = () => setSelected(new Set())
+
+  const bulkSetCategory = async (category: string) => {
+    if (!selected.size) return
+    setBulkUpdating(true)
+    const results = await Promise.all(Array.from(selected).map(id =>
+      fetch(`/api/contacts/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category }),
+      }).then(r => ({ id, ok: r.ok })).catch(() => ({ id, ok: false }))
+    ))
+    const succeededIds = new Set(results.filter(r => r.ok).map(r => r.id))
+    if (succeededIds.size > 0) setLocalContacts(prev => prev.map(c => succeededIds.has(c.id) ? { ...c, category } : c))
+    setSelected(new Set())
+    setBulkUpdating(false)
+  }
+
+  const exportSelected = (rows: Contact[]) => {
+    const targets = selected.size > 0 ? rows.filter(c => selected.has(c.id)) : rows
+    const header = 'Name,Phone,Email,Address,Category,Status,Source,Tags,Follow Up,Added'
+    const csv = [
+      header,
+      ...targets.map(c => [
+        c.name, c.phone, c.email, c.address, c.category, c.status, c.source,
+        (c.tags || []).join(';'), c.follow_up_date || '',
+        new Date(c.created_at).toLocaleDateString(),
+      ].map(v => `"${(v ?? '').toString().replace(/"/g, '""')}"`).join(',')),
+    ].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = 'contacts.csv'; a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const deleteSelected = async () => {
+    if (!selected.size) return
+    setDeleting(true)
+    const results = await Promise.all(Array.from(selected).map(id =>
+      fetch(`/api/contacts/${id}`, { method: 'DELETE' }).then(r => ({ id, ok: r.ok })).catch(() => ({ id, ok: false }))
+    ))
+    const deletedIds = new Set(results.filter(r => r.ok).map(r => r.id))
+    if (deletedIds.size > 0) setLocalContacts(prev => prev.filter(c => !deletedIds.has(c.id)))
+    setSelected(new Set()); setDeleteConfirm(false); setDeleting(false)
+  }
+
+  // ── Derived: unique tags + sources from loaded contacts ────────────────────
+  const allTags    = [...new Set(localContacts.flatMap(c => c.tags || []))].sort()
+  const allSources = [...new Set(localContacts.map(c => c.source).filter(Boolean))].sort()
+
+  const dueCount = localContacts.filter(c => {
     if (!c.follow_up_date) return false
     const d = new Date(c.follow_up_date + 'T00:00:00')
     const today = new Date(); today.setHours(0, 0, 0, 0)
@@ -129,7 +282,7 @@ export default function ContactsClient({ contacts }: { contacts: Contact[] }) {
 
   const activeFilterCount = [filterStatus, filterSource, filterTag, filterDue].filter(Boolean).length
 
-  const filtered = contacts.filter(c => {
+  const filtered = localContacts.filter(c => {
     if (activeCategory !== 'All' && c.category !== activeCategory) return false
     if (search) {
       const q = search.toLowerCase()
@@ -155,6 +308,9 @@ export default function ContactsClient({ contacts }: { contacts: Contact[] }) {
     return true
   })
 
+  const allSelected = filtered.length > 0 && filtered.every(c => selected.has(c.id))
+  const selectAll   = () => setSelected(new Set(filtered.map(c => c.id)))
+
   return (
     <div className="p-4 md:p-8" style={{ color: 'var(--c-primary)' }}>
 
@@ -163,7 +319,7 @@ export default function ContactsClient({ contacts }: { contacts: Contact[] }) {
         <div>
           <h1 className="text-2xl md:text-3xl font-bold" style={{ color: 'var(--c-primary)' }}>Contacts</h1>
           <p className="mt-0.5 text-sm" style={{ color: 'var(--c-text-2)' }}>
-            {contacts.length.toLocaleString()} total
+            {localContacts.length.toLocaleString()} total
             {dueCount > 0 && (
               <button
                 onClick={() => { setFilterDue('today'); setShowFilters(true) }}
@@ -361,23 +517,212 @@ export default function ContactsClient({ contacts }: { contacts: Contact[] }) {
       {filtered.length === 0 ? (
         <div className="rounded-2xl p-12 text-center"
           style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-          <p className="text-sm" style={{ color: 'var(--c-text-2)' }}>No contacts found.</p>
-          <a href="/contacts/new" className="text-sm font-semibold mt-2 inline-block hover:underline"
-            style={{ color: '#C9A84C' }}>
-            Add your first contact →
-          </a>
+          {(search || activeCategory !== 'All' || filterStatus || filterSource || filterTag || filterDue) ? (
+            <>
+              <p className="text-sm font-semibold" style={{ color: 'var(--c-primary)' }}>No contacts match your filters</p>
+              <button onClick={() => { setSearch(''); setActiveCategory('All'); setFilterStatus(''); setFilterSource(''); setFilterTag(''); setFilterDue('') }}
+                className="text-sm font-semibold mt-3 hover:underline" style={{ color: '#C9A84C' }}>
+                Clear filters →
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="text-sm" style={{ color: 'var(--c-text-2)' }}>No contacts yet.</p>
+              <a href="/contacts/new" className="text-sm font-semibold mt-2 inline-block hover:underline"
+                style={{ color: '#C9A84C' }}>
+                Add your first contact →
+              </a>
+            </>
+          )}
         </div>
       ) : (
         <div className="rounded-2xl"
           style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
 
           {/* Table toolbar — no overflow:hidden here so the dropdown can escape */}
-          <div className="relative flex items-center justify-between px-6 py-3"
+          <div className="relative flex items-center gap-2 flex-wrap px-6 py-3"
             style={{ borderBottom: '1px solid var(--c-border)' }}>
-            <span className="text-xs" style={{ color: 'var(--c-text-2)' }}>
+
+            {/* Select all */}
+            <label className="flex items-center gap-2 cursor-pointer shrink-0">
+              <input type="checkbox" checked={allSelected}
+                onChange={e => e.target.checked ? selectAll() : clearSelect()}
+                style={{ accentColor: '#C9A84C' }} />
+              <span className="text-xs font-semibold" style={{ color: 'var(--c-text-2)' }}>
+                {selected.size > 0 ? `${selected.size} selected` : 'Select All'}
+              </span>
+            </label>
+
+            {/* Bulk actions */}
+            {selected.size > 0 && (
+              <>
+                {/* Category change */}
+                <select
+                  disabled={bulkUpdating}
+                  onChange={e => { if (e.target.value) { bulkSetCategory(e.target.value); e.target.value = '' } }}
+                  className="text-xs font-semibold px-2 py-1 rounded-lg cursor-pointer"
+                  style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+                  <option value="">{bulkUpdating ? 'Updating…' : 'Set Category'}</option>
+                  {CATEGORIES.filter(c => c !== 'All').map(c => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+
+                {/* Export */}
+                <button onClick={() => exportSelected(filtered)}
+                  className="text-xs font-semibold px-2.5 py-1 rounded-lg hover:opacity-80"
+                  style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+                  Export {selected.size}
+                </button>
+
+                {/* Delete */}
+                {deleteConfirm ? (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-semibold" style={{ color: '#ef4444' }}>Delete {selected.size}?</span>
+                    <button onClick={deleteSelected} disabled={deleting}
+                      className="text-xs font-bold px-2.5 py-1 rounded-lg hover:opacity-80"
+                      style={{ backgroundColor: 'rgba(239,68,68,0.15)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.4)' }}>
+                      {deleting ? '…' : 'Confirm'}
+                    </button>
+                    <button onClick={() => setDeleteConfirm(false)}
+                      className="text-xs font-semibold px-2.5 py-1 rounded-lg hover:opacity-80"
+                      style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button onClick={() => setDeleteConfirm(true)}
+                    className="text-xs font-semibold px-2.5 py-1 rounded-lg hover:opacity-80"
+                    style={{ backgroundColor: 'rgba(239,68,68,0.08)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.3)' }}>
+                    Delete {selected.size}
+                  </button>
+                )}
+
+                <button onClick={clearSelect}
+                  className="text-xs font-semibold px-2.5 py-1 rounded-lg hover:opacity-80"
+                  style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+                  ✕ Clear
+                </button>
+              </>
+            )}
+
+            <span className="text-xs ml-auto shrink-0" style={{ color: 'var(--c-text-2)' }}>
               {filtered.length.toLocaleString()} contact{filtered.length !== 1 ? 's' : ''}
             </span>
-            <ColumnPicker columns={COLUMNS} visible={visible} onToggle={toggle} onReset={reset} />
+            <div className="flex items-center gap-2 shrink-0">
+              {/* Views dropdown */}
+              <div className="relative">
+                <button
+                  onClick={() => setViewMenuOpen(v => !v)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
+                  style={{
+                    backgroundColor: defaultViewId ? 'rgba(201,168,76,0.12)' : 'var(--c-card)',
+                    border: `1px solid ${defaultViewId ? '#C9A84C' : 'var(--c-border)'}`,
+                    color: defaultViewId ? '#C9A84C' : 'var(--c-text-2)',
+                  }}
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                  </svg>
+                  Views
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {viewMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setViewMenuOpen(false)} />
+                    <div className="absolute right-0 top-full mt-1 z-50 w-60 rounded-xl shadow-2xl overflow-hidden"
+                      style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+
+                      {defaultViewId && (
+                        <div className="flex items-center justify-between px-3 py-2"
+                          style={{ backgroundColor: 'rgba(201,168,76,0.08)', borderBottom: '1px solid var(--c-border)' }}>
+                          <span className="text-[10px] font-bold" style={{ color: '#C9A84C' }}>★ Default view active</span>
+                          <button onClick={removeDefaultView} className="text-[10px] hover:underline" style={{ color: 'var(--c-text-3)' }}>Clear</button>
+                        </div>
+                      )}
+
+                      <div className="px-3 py-2" style={{ borderBottom: '1px solid var(--c-border)' }}>
+                        <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--c-text-3)' }}>Presets</p>
+                      </div>
+                      {PRESET_CONTACT_VIEWS.map(v => {
+                        const isDefault = defaultViewId === v.id
+                        return (
+                          <div key={v.id} className="flex items-center group" style={{ borderBottom: '1px solid var(--c-border)' }}>
+                            <button onClick={() => applyView(v)} className="flex-1 flex items-center gap-2.5 px-3 py-2.5 text-left hover:opacity-80">
+                              <span className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold shrink-0"
+                                style={{ backgroundColor: 'rgba(107,189,224,0.15)', color: '#6ABDE0' }}>
+                                {v.name[0]?.toUpperCase()}
+                              </span>
+                              <span className="text-[11px] font-semibold flex-1" style={{ color: 'var(--c-primary)' }}>{v.name}</span>
+                              {isDefault && (
+                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0"
+                                  style={{ backgroundColor: 'rgba(201,168,76,0.2)', color: '#C9A84C' }}>DEFAULT</span>
+                              )}
+                            </button>
+                            <button
+                              onClick={() => isDefault ? removeDefaultView() : setDefaultView(v.id)}
+                              title={isDefault ? 'Remove default' : 'Set as default'}
+                              className="pr-3 opacity-0 group-hover:opacity-100 transition-opacity text-[11px] font-bold"
+                              style={{ color: isDefault ? '#C9A84C' : 'var(--c-text-3)' }}>
+                              {isDefault ? '★' : '☆'}
+                            </button>
+                          </div>
+                        )
+                      })}
+
+                      {savedViews.length > 0 && (
+                        <>
+                          <div className="px-3 py-2" style={{ borderBottom: '1px solid var(--c-border)' }}>
+                            <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--c-text-3)' }}>Saved</p>
+                          </div>
+                          {savedViews.map(v => {
+                            const isDefault = defaultViewId === v.id
+                            return (
+                              <div key={v.id} className="flex items-center group" style={{ borderBottom: '1px solid var(--c-border)' }}>
+                                <button onClick={() => applyView(v)} className="flex-1 flex items-center gap-2.5 px-3 py-2.5 text-left hover:opacity-80">
+                                  <span className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold shrink-0"
+                                    style={{ backgroundColor: 'rgba(201,168,76,0.15)', color: '#C9A84C' }}>
+                                    {v.name[0]?.toUpperCase()}
+                                  </span>
+                                  <span className="text-[11px] font-semibold flex-1" style={{ color: 'var(--c-primary)' }}>{v.name}</span>
+                                  {isDefault && (
+                                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0"
+                                      style={{ backgroundColor: 'rgba(201,168,76,0.2)', color: '#C9A84C' }}>DEFAULT</span>
+                                  )}
+                                </button>
+                                <div className="flex items-center gap-1 pr-3 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <button
+                                    onClick={() => isDefault ? removeDefaultView() : setDefaultView(v.id)}
+                                    title={isDefault ? 'Remove default' : 'Set as default'}
+                                    className="text-[11px] font-bold"
+                                    style={{ color: isDefault ? '#C9A84C' : 'var(--c-text-3)' }}>
+                                    {isDefault ? '★' : '☆'}
+                                  </button>
+                                  <button onClick={() => deleteView(v.id)} className="text-sm" style={{ color: '#ef4444' }}>×</button>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </>
+                      )}
+
+                      <button
+                        onClick={() => { setViewMenuOpen(false); setSaveViewOpen(true) }}
+                        className="w-full flex items-center gap-2 px-3 py-2.5 hover:opacity-80"
+                        style={{ color: '#C9A84C' }}>
+                        <span className="text-sm">+</span>
+                        <span className="text-[11px] font-semibold">Save Current View</span>
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <ColumnPicker columns={COLUMNS} visible={visible} onToggle={toggle} onReset={reset} />
+            </div>
           </div>
 
           {/* overflow-x: auto = scrollable; overflow-y: clip keeps rounded corners */}
@@ -386,6 +731,11 @@ export default function ContactsClient({ contacts }: { contacts: Contact[] }) {
             <table style={{ tableLayout: 'fixed', width: '100%', minWidth: 'max-content' }}>
               <thead>
                 <tr style={{ backgroundColor: 'var(--c-card-alt)', borderBottom: '1px solid var(--c-border)' }}>
+                  <th style={{ width: 40, padding: '12px 8px 12px 16px' }}>
+                    <input type="checkbox" checked={allSelected}
+                      onChange={e => e.target.checked ? selectAll() : clearSelect()}
+                      style={{ accentColor: '#C9A84C' }} />
+                  </th>
                   {([
                     { key: 'name'     as AnyCol, label: 'Name',      always: true },
                     { key: 'category' as AnyCol, label: 'Category',  always: false },
@@ -426,15 +776,24 @@ export default function ContactsClient({ contacts }: { contacts: Contact[] }) {
                 {filtered.filter(Boolean).map((contact) => {
                   const catColor = categoryColors[contact.category] || '#888'
                   const fu = getFollowUpMeta(contact.follow_up_date)
+                  const isSelected = selected.has(contact.id)
                   return (
                     <tr
                       key={contact.id}
                       className="cursor-pointer transition-colors"
-                      style={{ borderTop: '1px solid var(--c-border)' }}
-                      onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--c-hover)')}
-                      onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
-                      onClick={() => window.location.href = `/contacts/${contact.id}`}
+                      style={{
+                        borderTop: '1px solid var(--c-border)',
+                        backgroundColor: isSelected ? 'rgba(201,168,76,0.06)' : undefined,
+                      }}
+                      onMouseEnter={e => { if (!isSelected) e.currentTarget.style.backgroundColor = 'var(--c-hover)' }}
+                      onMouseLeave={e => { if (!isSelected) e.currentTarget.style.backgroundColor = '' }}
+                      onClick={() => router.push(`/contacts/${contact.id}`)}
                     >
+                      <td style={{ padding: '0 8px 0 16px', width: 40 }}
+                        onClick={e => { e.stopPropagation(); toggleSelect(contact.id) }}>
+                        <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(contact.id)}
+                          style={{ accentColor: '#C9A84C' }} onClick={e => e.stopPropagation()} />
+                      </td>
                       <td className="px-6 py-4">
                         <p className="font-semibold text-sm" style={{ color: 'var(--c-primary)' }}>{contact.name}</p>
                         {!isVisible('address') && contact.address && (
@@ -540,6 +899,74 @@ export default function ContactsClient({ contacts }: { contacts: Contact[] }) {
           </div>{/* end overflow clip wrapper */}
         </div>
       )}
+
+      {/* Save View Modal */}
+      {saveViewOpen && (
+        <>
+          <div className="fixed inset-0 z-50 bg-black/40" onClick={() => setSaveViewOpen(false)} />
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <SaveViewModal
+              onClose={() => setSaveViewOpen(false)}
+              onSave={(name) => { saveView(name); setSaveViewOpen(false) }}
+              category={activeCategory}
+              status={filterStatus}
+              source={filterSource}
+              tag={filterTag}
+              due={filterDue}
+            />
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── Save View Modal ──────────────────────────────────────────────────────────
+
+function SaveViewModal({ onClose, onSave, category, status, source, tag, due }: {
+  onClose: () => void
+  onSave: (name: string) => void
+  category: string; status: string; source: string; tag: string; due: string
+}) {
+  const [name, setName] = useState('')
+
+  const filters: string[] = []
+  if (category && category !== 'All') filters.push(category)
+  if (status)  filters.push(`Status: ${status}`)
+  if (source)  filters.push(`Source: ${source}`)
+  if (tag)     filters.push(`Tag: ${tag}`)
+  if (due)     filters.push(`Due: ${due}`)
+
+  return (
+    <div className="w-full max-w-sm rounded-2xl p-6 shadow-2xl"
+      style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+      <h2 className="text-sm font-bold mb-4" style={{ color: 'var(--c-primary)' }}>Save Contact View</h2>
+      <div className="mb-3">
+        <label className="text-[11px] font-semibold block mb-1" style={{ color: 'var(--c-text-3)' }}>View Name</label>
+        <input
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && name.trim() && onSave(name.trim())}
+          placeholder="e.g. My Investors"
+          autoFocus
+          className="w-full text-sm px-3 py-2 rounded-lg focus:outline-none"
+          style={{ backgroundColor: 'var(--c-input-bg)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }}
+        />
+      </div>
+      <p className="text-[10px] mb-5" style={{ color: 'var(--c-text-3)' }}>
+        {filters.length > 0 ? `Saves: ${filters.join(' · ')}` : 'Saves current filter state (no filters applied)'}
+      </p>
+      <div className="flex gap-2">
+        <button onClick={onClose} className="flex-1 text-xs font-semibold py-2 rounded-lg hover:opacity-80"
+          style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+          Cancel
+        </button>
+        <button onClick={() => name.trim() && onSave(name.trim())} disabled={!name.trim()}
+          className="flex-1 text-xs font-bold py-2 rounded-lg hover:opacity-80 disabled:opacity-40"
+          style={{ backgroundColor: 'var(--c-primary)', color: '#C9A84C' }}>
+          Save View
+        </button>
+      </div>
     </div>
   )
 }

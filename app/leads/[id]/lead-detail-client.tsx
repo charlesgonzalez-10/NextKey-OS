@@ -1,8 +1,14 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, lazy, Suspense } from 'react'
 import { useRouter } from 'next/navigation'
 import PropertyMapCard from '@/components/PropertyMapCard'
+import dynamic from 'next/dynamic'
+import type { CompsResult } from '@/lib/mls/beaches-mls'
+
+const CompsMap = lazy(() => import('@/components/CompsMap'))
+const EmailComposer = dynamic(() => import('@/components/EmailComposer'), { ssr: false })
+const DocumentsTab  = dynamic(() => import('@/components/DocumentsTab'),  { ssr: false })
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -59,7 +65,31 @@ interface Contact {
   email: string
 }
 
-type TabKey = 'overview' | 'foreclosure' | 'mortgage' | 'comps' | 'communications' | 'ai'
+type TabKey = 'overview' | 'foreclosure' | 'mortgage' | 'comps' | 'contacts' | 'communications' | 'documents' | 'ai'
+
+// ─── Lead-Contact types ───────────────────────────────────────────────────────
+
+interface LinkedContact {
+  id:                string
+  relationship_type: string
+  is_primary:        boolean
+  notes:             string | null
+  created_at:        string
+  contact: {
+    id:       string
+    name:     string
+    phone:    string | null
+    email:    string | null
+    address:  string | null
+    category: string | null
+    status:   string | null
+  }
+}
+
+const RELATIONSHIP_TYPES = [
+  'Owner', 'Co-owner', 'Heir', 'Spouse', 'Attorney',
+  'Agent', 'Lender', 'Buyer', 'Wholesaler', 'Other',
+]
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -584,10 +614,10 @@ function ForeclosureTab({ lead, propertyId }: { lead: Lead; propertyId: string }
             <span style={{ color: '#ef4444' }}>365d</span>
           </div>
           <p className="text-xs mt-3" style={{ color: 'rgba(255,255,255,0.5)' }}>
-            {ds <= 30  ? '✓ Early stage — high potential to negotiate before auction' :
-             ds <= 90  ? '⚡ Mid stage — owner likely receiving calls. Act now.' :
-             ds <= 180 ? '⚠ Late stage — auction may be scheduled. Verify status.' :
-             '🔴 Critical — auction imminent or may have occurred. Verify immediately.'}
+            {ds <= 30  ? 'Early stage — high potential to negotiate before auction' :
+             ds <= 90  ? 'Mid stage — owner likely receiving calls. Act now.' :
+             ds <= 180 ? 'Late stage — auction may be scheduled. Verify status.' :
+             'Critical — auction imminent or may have occurred. Verify immediately.'}
           </p>
         </div>
       )}
@@ -606,7 +636,7 @@ function ForeclosureTab({ lead, propertyId }: { lead: Lead; propertyId: string }
         <InfoRow label="Plaintiff"     value={lead.plaintiff} />
         <InfoRow label="Lender"        value={lead.lender_name} />
         <InfoRow label="Loan Balance"  value={fmt$(lead.foreclosure_amount)} />
-        <InfoRow label="Multiple Liens" value={lead.multiple_liens ? '⚠ Yes — Verify all lien positions' : 'No'} />
+        <InfoRow label="Multiple Liens" value={lead.multiple_liens ? 'Yes — Verify all lien positions' : 'No'} />
         <InfoRow label="County"        value={COUNTY_LABELS[lead.county] ?? lead.county} />
         <InfoRow label="Data Source"   value={lead.data_source} />
       </div>
@@ -674,7 +704,7 @@ function MortgageTab({ lead }: { lead: Lead }) {
 
         <InfoRow label="Lender" value={lead.lender_name} />
         <InfoRow label="Equity Tier" value={lead.equity_tier} />
-        <InfoRow label="Multiple Liens" value={lead.multiple_liens ? '⚠ Yes — verify all positions' : 'No'} />
+        <InfoRow label="Multiple Liens" value={lead.multiple_liens ? 'Yes — verify all positions' : 'No'} />
       </div>
 
       <div className="rounded-2xl p-4" style={{ backgroundColor: 'rgba(201,168,76,0.08)', border: '1px solid rgba(201,168,76,0.2)' }}>
@@ -695,6 +725,7 @@ interface MlsComp {
   mls_number:    string | null
   address:       string
   city:          string
+  zip:           string
   status:        string
   beds:          number | null
   baths:         number | null
@@ -707,6 +738,9 @@ interface MlsComp {
   list_date:     string | null
   days_on_market: number | null
   distance_miles: number | null
+  property_type: string | null
+  lat?:          number | null
+  lng?:          number | null
 }
 
 interface MlsCompsResult {
@@ -715,26 +749,64 @@ interface MlsCompsResult {
   pending:            MlsComp[]
   median_sold_price:  number | null
   avg_price_per_sqft: number | null
+  avm_estimate?:      number | null
   radius_miles:       number
   fetched_at:         string
+  subject_lat?:       number
+  subject_lng?:       number
+  source?:            string
+}
+
+interface CompsFilter {
+  radiusMi:     number
+  monthsBack:   number
+  propertyType: string
+  minPrice:     string
+  maxPrice:     string
+  beds:         string
+  baths:        string
+}
+
+type SortKey = 'date' | 'price' | 'beds' | 'baths' | 'sqft' | 'ppsf' | 'year' | 'distance' | 'type'
+type SortDir = 'asc' | 'desc'
+
+const DEFAULT_COMPS_FILTER: CompsFilter = {
+  radiusMi:     0.5,
+  monthsBack:   12,
+  propertyType: '',
+  minPrice:     '',
+  maxPrice:     '',
+  beds:         '',
+  baths:        '',
 }
 
 function CompsTab({ lead, comps }: { lead: Lead; comps: Comp[] }) {
-  const [mlsComps,   setMlsComps]   = useState<MlsCompsResult | null>(null)
-  const [mlsLoading, setMlsLoading] = useState(false)
-  const [mlsError,   setMlsError]   = useState<string | null>(null)
-  const [mlsRadius,  setMlsRadius]  = useState(0.5)
+  const [mlsComps,      setMlsComps]      = useState<MlsCompsResult | null>(null)
+  const [mlsLoading,    setMlsLoading]    = useState(false)
+  const [mlsError,      setMlsError]      = useState<string | null>(null)
   const [noCredentials, setNoCredentials] = useState(false)
+  const [showMap,       setShowMap]       = useState(true)
+  const [showFilters,   setShowFilters]   = useState(false)
+  const [filter,        setFilter]        = useState<CompsFilter>(DEFAULT_COMPS_FILTER)
+  const [draftFilter,   setDraftFilter]   = useState<CompsFilter>(DEFAULT_COMPS_FILTER)
+  const [sortKey,       setSortKey]       = useState<SortKey>('date')
+  const [sortDir,       setSortDir]       = useState<SortDir>('desc')
+  const [activeComp,    setActiveComp]    = useState<MlsComp | null>(null)
 
-  const fetchMlsComps = async (radiusMi = mlsRadius) => {
+  const fetchMlsComps = async (f = filter) => {
     const addrFull = [lead.property_address, lead.city, lead.state, lead.zip].filter(Boolean).join(', ')
     if (!addrFull) return
     setMlsLoading(true)
     setMlsError(null)
     try {
-      const params = new URLSearchParams({ address: addrFull, radius: String(radiusMi) })
-      if (lead.beds)        params.set('beds', String(lead.beds))
-      if (lead.living_area) params.set('sqft', String(lead.living_area))
+      const params = new URLSearchParams({ address: addrFull })
+      params.set('radius',  String(f.radiusMi))
+      params.set('months',  String(f.monthsBack))
+      if (f.propertyType) params.set('propertyType', f.propertyType)
+      if (f.minPrice)     params.set('minPrice',     f.minPrice)
+      if (f.maxPrice)     params.set('maxPrice',     f.maxPrice)
+      if (f.beds)         params.set('beds',         f.beds)
+      if (f.baths)        params.set('baths',        f.baths)
       const res  = await fetch(`/api/mls/comps?${params}`)
       const data = await res.json()
       if (!res.ok) {
@@ -814,7 +886,52 @@ function CompsTab({ lead, comps }: { lead: Lead; comps: Comp[] }) {
 
   // ── MLS live comps ─────────────────────────────────────────────────────────
 
-  // Header row: source badge + radius toggle + refresh
+  // ── Sort ──────────────────────────────────────────────────────────────────────
+  const sortComps = (items: MlsComp[], priceKey: 'sold_price' | 'list_price'): MlsComp[] => {
+    const d = sortDir === 'asc' ? 1 : -1
+    return [...items].sort((a, b) => {
+      let av: number | string | null | undefined
+      let bv: number | string | null | undefined
+      switch (sortKey) {
+        case 'price':    av = a[priceKey];     bv = b[priceKey];     break
+        case 'date':     av = a.sold_date ?? a.list_date; bv = b.sold_date ?? b.list_date; break
+        case 'beds':     av = a.beds;          bv = b.beds;          break
+        case 'baths':    av = a.baths;         bv = b.baths;         break
+        case 'sqft':     av = a.living_area;   bv = b.living_area;   break
+        case 'ppsf':     av = a.price_per_sqft; bv = b.price_per_sqft; break
+        case 'year':     av = a.year_built;    bv = b.year_built;    break
+        case 'distance': av = a.distance_miles; bv = b.distance_miles; break
+        case 'type':     av = a.property_type ?? ''; bv = b.property_type ?? ''; break
+        default:         return 0
+      }
+      if (av == null && bv == null) return 0
+      if (av == null) return 1
+      if (bv == null) return -1
+      if (typeof av === 'string' && typeof bv === 'string') return d * av.localeCompare(bv)
+      return d * ((av as number) - (bv as number))
+    })
+  }
+
+  const SORT_OPTIONS: { k: SortKey; l: string }[] = [
+    { k: 'date',     l: 'Date'    },
+    { k: 'price',    l: 'Price'   },
+    { k: 'beds',     l: 'Beds'    },
+    { k: 'baths',    l: 'Baths'   },
+    { k: 'sqft',     l: 'Sqft'    },
+    { k: 'ppsf',     l: '$/sf'    },
+    { k: 'year',     l: 'Year'    },
+    { k: 'distance', l: 'Dist'    },
+    { k: 'type',     l: 'Type'    },
+  ]
+
+  // ── Header ────────────────────────────────────────────────────────────────────
+  const filterIsActive = (
+    filter.radiusMi     !== DEFAULT_COMPS_FILTER.radiusMi     ||
+    filter.monthsBack   !== DEFAULT_COMPS_FILTER.monthsBack   ||
+    !!filter.propertyType || !!filter.minPrice || !!filter.maxPrice ||
+    !!filter.beds || !!filter.baths
+  )
+
   const Header = () => (
     <div className="flex items-center justify-between mb-4">
       <div className="flex items-center gap-2">
@@ -825,23 +942,37 @@ function CompsTab({ lead, comps }: { lead: Lead; comps: Comp[] }) {
           style={{ backgroundColor: 'rgba(76,175,154,0.12)', color: '#4CAF9A', border: '1px solid rgba(76,175,154,0.25)' }}>
           {mlsComps ? (mlsComps as MlsCompsResult & { source?: string }).source === 'rentcast' ? 'Rentcast' : 'Beaches MLS' : 'MLS'}
         </span>
+        {filterIsActive && (
+          <span className="text-[9px] font-bold px-2 py-0.5 rounded-full"
+            style={{ backgroundColor: 'rgba(201,168,76,0.12)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.3)' }}>
+            {filter.radiusMi}mi · {filter.monthsBack}mo
+            {filter.propertyType ? ` · ${filter.propertyType.replace('Single Family', 'SF').replace('Condominium', 'Condo')}` : ''}
+          </span>
+        )}
       </div>
       <div className="flex items-center gap-2">
-        {/* Radius toggle */}
-        <div className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--c-text-3)' }}>
-          {[0.25, 0.5, 1].map(r => (
-            <button key={r}
-              onClick={() => { setMlsRadius(r); fetchMlsComps(r) }}
-              className="px-2 py-0.5 rounded-lg font-bold transition-all"
-              style={{
-                backgroundColor: mlsRadius === r ? 'rgba(201,168,76,0.15)' : 'var(--c-hover)',
-                color:           mlsRadius === r ? '#C9A84C' : 'var(--c-text-3)',
-                border:          `1px solid ${mlsRadius === r ? 'rgba(201,168,76,0.35)' : 'var(--c-border)'}`,
-              }}>
-              {r}mi
-            </button>
-          ))}
-        </div>
+        <button
+          onClick={() => { if (!showFilters) setDraftFilter(filter); setShowFilters(v => !v) }}
+          className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all hover:opacity-80"
+          style={{
+            backgroundColor: showFilters ? 'rgba(201,168,76,0.12)' : filterIsActive ? 'rgba(201,168,76,0.08)' : 'var(--c-hover)',
+            color: showFilters || filterIsActive ? '#C9A84C' : 'var(--c-text-3)',
+            border: `1px solid ${showFilters || filterIsActive ? 'rgba(201,168,76,0.35)' : 'var(--c-border)'}`,
+          }}>
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/>
+          </svg>
+          Filters{filterIsActive ? ' ●' : ''}
+        </button>
+        <button
+          onClick={() => setShowMap(v => !v)}
+          className="px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all hover:opacity-80"
+          style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-3)', border: '1px solid var(--c-border)' }}>
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/>
+          </svg>
+          {showMap ? 'Hide Map' : 'Map'}
+        </button>
         <button
           onClick={() => fetchMlsComps()}
           disabled={mlsLoading}
@@ -862,7 +993,12 @@ function CompsTab({ lead, comps }: { lead: Lead; comps: Comp[] }) {
       <div className="space-y-5">
         <Header />
         <div className="rounded-2xl p-8 text-center" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-          <p className="text-2xl mb-3">🔑</p>
+          <div className="w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-3"
+            style={{ backgroundColor: 'var(--c-hover)' }}>
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--c-text-3)' }}>
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+            </svg>
+          </div>
           <p className="font-bold text-sm mb-1" style={{ color: 'var(--c-primary)' }}>Comps Not Connected</p>
           <p className="text-sm mb-4" style={{ color: 'var(--c-text-2)' }}>
             Add a Rentcast API key to pull live comps and active listings.
@@ -955,11 +1091,186 @@ function CompsTab({ lead, comps }: { lead: Lead; comps: Comp[] }) {
 
   const { sold: mlsSold, active: mlsActive, pending: mlsPending,
           median_sold_price, avg_price_per_sqft } = mlsComps
-  const totalComps = mlsSold.length + mlsActive.length + mlsPending.length
+  const totalComps  = mlsSold.length + mlsActive.length + mlsPending.length
+  const subjectLat  = (mlsComps as MlsCompsResult & { subject_lat?: number }).subject_lat ?? null
+  const subjectLng  = (mlsComps as MlsCompsResult & { subject_lng?: number }).subject_lng ?? null
+  const hasMapData  = !!(subjectLat && subjectLng && [...mlsSold, ...mlsActive].some(c => (c as MlsComp & { lat?: number }).lat))
+
+  // ── Filter panel apply/clear handlers ─────────────────────────────────────────
+  const applyDraftFilter = () => {
+    setFilter(draftFilter)
+    setShowFilters(false)
+    fetchMlsComps(draftFilter)
+  }
+  const clearFilters = () => {
+    setDraftFilter(DEFAULT_COMPS_FILTER)
+    setFilter(DEFAULT_COMPS_FILTER)
+    setShowFilters(false)
+    fetchMlsComps(DEFAULT_COMPS_FILTER)
+  }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <Header />
+
+      {/* Filter panel */}
+      {showFilters && (
+        <div className="rounded-2xl p-4 space-y-4" style={{ backgroundColor: 'var(--c-card)', border: '1px solid rgba(201,168,76,0.2)' }}>
+          {/* Radius + Months */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--c-text-3)' }}>Radius</p>
+              <div className="flex gap-1">
+                {([0.25, 0.5, 1, 2] as const).map(r => (
+                  <button key={r}
+                    onClick={() => setDraftFilter(d => ({ ...d, radiusMi: r }))}
+                    className="flex-1 py-1.5 rounded-lg text-[10px] font-bold transition-all"
+                    style={{
+                      backgroundColor: draftFilter.radiusMi === r ? 'rgba(201,168,76,0.15)' : 'var(--c-hover)',
+                      color:           draftFilter.radiusMi === r ? '#C9A84C' : 'var(--c-text-3)',
+                      border:          `1px solid ${draftFilter.radiusMi === r ? 'rgba(201,168,76,0.4)' : 'var(--c-border)'}`,
+                    }}>{r}mi</button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--c-text-3)' }}>Months Back</p>
+              <div className="flex gap-1">
+                {([3, 6, 12, 24] as const).map(m => (
+                  <button key={m}
+                    onClick={() => setDraftFilter(d => ({ ...d, monthsBack: m }))}
+                    className="flex-1 py-1.5 rounded-lg text-[10px] font-bold transition-all"
+                    style={{
+                      backgroundColor: draftFilter.monthsBack === m ? 'rgba(201,168,76,0.15)' : 'var(--c-hover)',
+                      color:           draftFilter.monthsBack === m ? '#C9A84C' : 'var(--c-text-3)',
+                      border:          `1px solid ${draftFilter.monthsBack === m ? 'rgba(201,168,76,0.4)' : 'var(--c-border)'}`,
+                    }}>{m}mo</button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Property type */}
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--c-text-3)' }}>Property Type</p>
+            <div className="flex flex-wrap gap-1">
+              {[
+                { v: '',               l: 'All'           },
+                { v: 'Single Family',  l: 'Single Family' },
+                { v: 'Condominium',    l: 'Condo'         },
+                { v: 'Townhouse',      l: 'Townhouse'     },
+                { v: 'Multi-Family',   l: 'Multi-Family'  },
+              ].map(({ v, l }) => (
+                <button key={v}
+                  onClick={() => setDraftFilter(d => ({ ...d, propertyType: v }))}
+                  className="px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all"
+                  style={{
+                    backgroundColor: draftFilter.propertyType === v ? 'rgba(201,168,76,0.15)' : 'var(--c-hover)',
+                    color:           draftFilter.propertyType === v ? '#C9A84C' : 'var(--c-text-3)',
+                    border:          `1px solid ${draftFilter.propertyType === v ? 'rgba(201,168,76,0.4)' : 'var(--c-border)'}`,
+                  }}>{l}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Price range */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-1.5" style={{ color: 'var(--c-text-3)' }}>Min Price</p>
+              <input
+                type="number" placeholder="No min"
+                value={draftFilter.minPrice}
+                onChange={e => setDraftFilter(d => ({ ...d, minPrice: e.target.value }))}
+                className="w-full px-2.5 py-1.5 rounded-lg text-xs"
+                style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)', outline: 'none' }}
+              />
+            </div>
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-1.5" style={{ color: 'var(--c-text-3)' }}>Max Price</p>
+              <input
+                type="number" placeholder="No max"
+                value={draftFilter.maxPrice}
+                onChange={e => setDraftFilter(d => ({ ...d, maxPrice: e.target.value }))}
+                className="w-full px-2.5 py-1.5 rounded-lg text-xs"
+                style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)', outline: 'none' }}
+              />
+            </div>
+          </div>
+
+          {/* Beds + Baths */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--c-text-3)' }}>Beds (exact)</p>
+              <div className="flex gap-1">
+                {['', '2', '3', '4', '5'].map(b => (
+                  <button key={b}
+                    onClick={() => setDraftFilter(d => ({ ...d, beds: b }))}
+                    className="flex-1 py-1.5 rounded-lg text-[10px] font-bold transition-all"
+                    style={{
+                      backgroundColor: draftFilter.beds === b ? 'rgba(201,168,76,0.15)' : 'var(--c-hover)',
+                      color:           draftFilter.beds === b ? '#C9A84C' : 'var(--c-text-3)',
+                      border:          `1px solid ${draftFilter.beds === b ? 'rgba(201,168,76,0.4)' : 'var(--c-border)'}`,
+                    }}>{b || 'Any'}</button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--c-text-3)' }}>Baths (exact)</p>
+              <div className="flex gap-1">
+                {['', '1', '2', '3', '4'].map(b => (
+                  <button key={b}
+                    onClick={() => setDraftFilter(d => ({ ...d, baths: b }))}
+                    className="flex-1 py-1.5 rounded-lg text-[10px] font-bold transition-all"
+                    style={{
+                      backgroundColor: draftFilter.baths === b ? 'rgba(201,168,76,0.15)' : 'var(--c-hover)',
+                      color:           draftFilter.baths === b ? '#C9A84C' : 'var(--c-text-3)',
+                      border:          `1px solid ${draftFilter.baths === b ? 'rgba(201,168,76,0.4)' : 'var(--c-border)'}`,
+                    }}>{b || 'Any'}</button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="flex gap-2 pt-1 border-t" style={{ borderColor: 'var(--c-border)' }}>
+            <button onClick={applyDraftFilter}
+              className="flex-1 py-2 rounded-xl text-xs font-bold transition-all hover:opacity-90"
+              style={{ backgroundColor: 'var(--c-primary)', color: '#C9A84C' }}>
+              Apply Filters
+            </button>
+            {filterIsActive && (
+              <button onClick={clearFilters}
+                className="px-4 py-2 rounded-xl text-xs font-bold transition-all hover:opacity-80"
+                style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-3)', border: '1px solid var(--c-border)' }}>
+                Clear
+              </button>
+            )}
+            <button onClick={() => setShowFilters(false)}
+              className="px-4 py-2 rounded-xl text-xs font-bold transition-all hover:opacity-80"
+              style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-3)', border: '1px solid var(--c-border)' }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Comps map */}
+      {hasMapData && showMap && (
+        <Suspense fallback={
+          <div className="rounded-2xl flex items-center justify-center" style={{ height: 340, backgroundColor: '#071829', border: '1px solid var(--c-border)' }}>
+            <div className="w-5 h-5 border-2 border-t-transparent rounded-full animate-spin" style={{ borderColor: '#C9A84C', borderTopColor: 'transparent' }} />
+          </div>
+        }>
+          <CompsMap
+            subjectLat={subjectLat}
+            subjectLng={subjectLng}
+            subjectAddr={lead.property_address ?? ''}
+            sold={mlsSold as Parameters<typeof CompsMap>[0]['sold']}
+            active={mlsActive as Parameters<typeof CompsMap>[0]['active']}
+            pending={mlsPending as Parameters<typeof CompsMap>[0]['pending']}
+          />
+        </Suspense>
+      )}
 
       {/* Stats */}
       {totalComps > 0 && (
@@ -973,8 +1284,33 @@ function CompsTab({ lead, comps }: { lead: Lead; comps: Comp[] }) {
 
       {totalComps === 0 && (
         <div className="rounded-2xl p-6 text-center" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-          <p className="text-sm mb-1" style={{ color: 'var(--c-text-3)' }}>No comps found within {mlsRadius}mi</p>
-          <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>Try expanding the radius above</p>
+          <p className="text-sm mb-1" style={{ color: 'var(--c-text-3)' }}>No comps found within {filter.radiusMi}mi</p>
+          <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>Try expanding the radius in Filters</p>
+        </div>
+      )}
+
+      {/* Sort bar */}
+      {totalComps > 0 && (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: 'var(--c-text-3)' }}>Sort</span>
+          {SORT_OPTIONS.map(({ k, l }) => {
+            const active = sortKey === k
+            return (
+              <button key={k}
+                onClick={() => {
+                  if (active) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+                  else { setSortKey(k); setSortDir('desc') }
+                }}
+                className="px-2 py-0.5 rounded-md text-[10px] font-bold transition-all"
+                style={{
+                  backgroundColor: active ? 'rgba(201,168,76,0.12)' : 'var(--c-hover)',
+                  color:           active ? '#C9A84C'                : 'var(--c-text-3)',
+                  border:          `1px solid ${active ? 'rgba(201,168,76,0.35)' : 'var(--c-border)'}`,
+                }}>
+                {l}{active ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
+              </button>
+            )
+          })}
         </div>
       )}
 
@@ -988,9 +1324,15 @@ function CompsTab({ lead, comps }: { lead: Lead; comps: Comp[] }) {
             {label} ({items.length})
           </h3>
           <div className="space-y-2">
-            {items.map((comp, i) => (
+            {sortComps(items, priceKey).map((comp, i) => (
               <div key={comp.mls_number ?? i}
-                className="rounded-xl p-4" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                onClick={() => setActiveComp(comp)}
+                className="rounded-xl p-4 cursor-pointer transition-all hover:opacity-90"
+                style={{
+                  backgroundColor: 'var(--c-card)',
+                  border: `1px solid ${activeComp === comp ? color + '50' : 'var(--c-border)'}`,
+                  boxShadow: activeComp === comp ? `0 0 0 1px ${color}30` : undefined,
+                }}>
                 <div className="flex items-start justify-between mb-1.5">
                   <div className="min-w-0 flex-1 pr-3">
                     <p className="text-sm font-semibold" style={{ color: 'var(--c-primary)' }}>
@@ -1006,17 +1348,25 @@ function CompsTab({ lead, comps }: { lead: Lead; comps: Comp[] }) {
                       ].filter(Boolean).join(' · ')}
                     </p>
                   </div>
-                  <div className="text-right shrink-0">
-                    <p className="text-sm font-bold" style={{ color }}>{fmtK(comp[priceKey])}</p>
-                    {comp.price_per_sqft && (
-                      <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>${comp.price_per_sqft}/sf</p>
-                    )}
+                  <div className="flex items-start gap-3 shrink-0">
+                    <div className="text-right">
+                      <p className="text-sm font-bold" style={{ color }}>{fmtK(comp[priceKey])}</p>
+                      {comp.price_per_sqft && (
+                        <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>${comp.price_per_sqft}/sf</p>
+                      )}
+                    </div>
+                    <span className="text-[10px] mt-0.5" style={{ color: 'var(--c-text-3)' }}>›</span>
                   </div>
                 </div>
                 <div className="flex items-center gap-3 mt-1">
                   {comp.sold_date && (
                     <p className="text-[11px]" style={{ color: 'var(--c-text-3)' }}>
                       Sold {new Date(comp.sold_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                    </p>
+                  )}
+                  {comp.list_date && !comp.sold_date && (
+                    <p className="text-[11px]" style={{ color: 'var(--c-text-3)' }}>
+                      Listed {new Date(comp.list_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                     </p>
                   )}
                   {comp.days_on_market != null && (
@@ -1033,6 +1383,517 @@ function CompsTab({ lead, comps }: { lead: Lead; comps: Comp[] }) {
           </div>
         </div>
       ))}
+
+      {/* Comp detail drawer */}
+      {activeComp && (() => {
+        const dc = activeComp
+        const isS = dc.status === 'sold'
+        const isA = dc.status === 'active'
+        const statusColor = isS ? '#4CAF9A' : isA ? '#C9A84C' : '#7B8FD4'
+        const statusLabel = isS ? 'Sold' : isA ? 'Active' : 'Pending'
+        const price = dc.sold_price ?? dc.list_price
+
+        return (
+          <>
+            {/* Backdrop */}
+            <div
+              className="fixed inset-0 z-40"
+              style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}
+              onClick={() => setActiveComp(null)}
+            />
+            {/* Drawer */}
+            <div
+              className="fixed right-0 top-0 bottom-0 z-50 overflow-y-auto"
+              style={{
+                width: 340,
+                backgroundColor: 'var(--c-bg)',
+                borderLeft: '1px solid var(--c-border)',
+                boxShadow: '-8px 0 32px rgba(0,0,0,0.4)',
+              }}>
+              {/* Drawer header */}
+              <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-4"
+                style={{ backgroundColor: 'var(--c-bg)', borderBottom: '1px solid var(--c-border)' }}>
+                <div className="flex items-center gap-2">
+                  <span className="text-[9px] font-bold px-2 py-0.5 rounded-full"
+                    style={{ backgroundColor: `${statusColor}18`, color: statusColor, border: `1px solid ${statusColor}40` }}>
+                    {statusLabel}
+                  </span>
+                  <span className="text-xs font-bold" style={{ color: 'var(--c-text-2)' }}>Comp Detail</span>
+                </div>
+                <button
+                  onClick={() => setActiveComp(null)}
+                  className="w-7 h-7 flex items-center justify-center rounded-full text-sm hover:opacity-70 transition-opacity"
+                  style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)' }}>✕</button>
+              </div>
+
+              <div className="px-5 py-4 space-y-5">
+                {/* Address + price */}
+                <div>
+                  <p className="text-base font-bold leading-tight" style={{ color: 'var(--c-primary)' }}>{dc.address}</p>
+                  {(dc.city || dc.zip) && (
+                    <p className="text-xs mt-0.5" style={{ color: 'var(--c-text-3)' }}>
+                      {dc.city}{dc.zip ? `, ${dc.zip}` : ''}
+                    </p>
+                  )}
+                  <div className="flex items-baseline gap-2 mt-3">
+                    <p className="text-2xl font-bold" style={{ color: statusColor }}>
+                      {price ? (price >= 1_000_000 ? `$${(price / 1_000_000).toFixed(2)}M` : `$${price.toLocaleString()}`) : '—'}
+                    </p>
+                    {dc.price_per_sqft && (
+                      <p className="text-xs font-bold" style={{ color: 'var(--c-text-3)' }}>${dc.price_per_sqft}/sf</p>
+                    )}
+                  </div>
+                  {isS && dc.list_price && dc.sold_price && dc.list_price !== dc.sold_price && (
+                    <p className="text-[11px] mt-0.5" style={{ color: 'var(--c-text-3)' }}>
+                      Listed at ${dc.list_price.toLocaleString()} ·{' '}
+                      <span style={{ color: dc.sold_price >= dc.list_price ? '#4CAF9A' : '#E74C3C' }}>
+                        {dc.sold_price >= dc.list_price ? '+' : ''}{(((dc.sold_price - dc.list_price) / dc.list_price) * 100).toFixed(1)}%
+                      </span>
+                    </p>
+                  )}
+                </div>
+
+                {/* Property details */}
+                <div className="rounded-xl p-4 space-y-3" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                  <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--c-text-3)' }}>Property</p>
+                  <div className="grid grid-cols-2 gap-y-2.5 gap-x-4">
+                    {[
+                      { l: 'Beds',         v: dc.beds       ? `${dc.beds} bd`                                : null },
+                      { l: 'Baths',        v: dc.baths      ? `${dc.baths} ba`                              : null },
+                      { l: 'Living Area',  v: dc.living_area? `${dc.living_area.toLocaleString()} sf`        : null },
+                      { l: 'Year Built',   v: dc.year_built ? String(dc.year_built)                         : null },
+                      { l: 'Type',         v: dc.property_type ?? null },
+                      { l: 'Distance',     v: dc.distance_miles != null ? `${dc.distance_miles} mi`         : null },
+                    ].filter(r => r.v).map(({ l, v }) => (
+                      <div key={l}>
+                        <p className="text-[9px] uppercase tracking-wider" style={{ color: 'var(--c-text-3)' }}>{l}</p>
+                        <p className="text-xs font-semibold mt-0.5" style={{ color: 'var(--c-text-2)' }}>{v}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Listing timeline */}
+                <div className="rounded-xl p-4 space-y-3" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                  <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--c-text-3)' }}>Listing</p>
+                  <div className="space-y-2.5">
+                    {[
+                      { l: 'List Price',      v: dc.list_price  ? `$${dc.list_price.toLocaleString()}`  : null },
+                      { l: 'Sold Price',      v: dc.sold_price  ? `$${dc.sold_price.toLocaleString()}`  : null },
+                      { l: 'List Date',       v: dc.list_date   ? new Date(dc.list_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : null },
+                      { l: 'Sold Date',       v: dc.sold_date   ? new Date(dc.sold_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : null },
+                      { l: 'Days on Market',  v: dc.days_on_market != null ? `${dc.days_on_market} days` : null },
+                      { l: 'MLS Number',      v: dc.mls_number ?? null },
+                    ].filter(r => r.v).map(({ l, v }) => (
+                      <div key={l} className="flex items-center justify-between">
+                        <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>{l}</p>
+                        <p className="text-xs font-semibold" style={{ color: 'var(--c-text-2)', fontFamily: l === 'MLS Number' ? 'monospace' : undefined }}>{v}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Compare to subject */}
+                {(mlsComps as MlsCompsResult & { avm_estimate?: number | null }).avm_estimate && (
+                  <div className="rounded-xl p-4 space-y-3" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                    <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--c-text-3)' }}>vs. Subject AVM</p>
+                    {(() => {
+                      const avm = (mlsComps as MlsCompsResult & { avm_estimate?: number | null }).avm_estimate!
+                      const delta = price ? ((price - avm) / avm) * 100 : null
+                      return (
+                        <div className="flex items-center justify-between">
+                          <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>Subject AVM</p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-xs font-semibold" style={{ color: 'var(--c-text-2)' }}>${avm.toLocaleString()}</p>
+                            {delta != null && (
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                                style={{
+                                  backgroundColor: Math.abs(delta) < 5 ? 'rgba(76,175,154,0.12)' : 'rgba(201,168,76,0.12)',
+                                  color: Math.abs(delta) < 5 ? '#4CAF9A' : '#C9A84C',
+                                }}>
+                                {delta > 0 ? '+' : ''}{delta.toFixed(1)}%
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })()}
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )
+      })()}
+    </div>
+  )
+}
+
+// ─── Contacts Tab ─────────────────────────────────────────────────────────────
+
+function ContactsTab({ propertyId }: { propertyId: string }) {
+  const [links,        setLinks]        = useState<LinkedContact[]>([])
+  const [loading,      setLoading]      = useState(true)
+  const [panel,        setPanel]        = useState<'none' | 'link' | 'create'>('none')
+
+  // Link-existing search state
+  const [searchQ,      setSearchQ]      = useState('')
+  const [searchRes,    setSearchRes]    = useState<LinkedContact['contact'][]>([])
+  const [searching,    setSearching]    = useState(false)
+  const [linkRelType,  setLinkRelType]  = useState('Owner')
+  const [linkPrimary,  setLinkPrimary]  = useState(false)
+
+  // Create-new form state
+  const [newName,      setNewName]      = useState('')
+  const [newPhone,     setNewPhone]     = useState('')
+  const [newEmail,     setNewEmail]     = useState('')
+  const [newAddr,      setNewAddr]      = useState('')
+  const [newRelType,   setNewRelType]   = useState('Owner')
+  const [newPrimary,   setNewPrimary]   = useState(false)
+  const [saving,       setSaving]       = useState(false)
+  const [saveErr,      setSaveErr]      = useState<string | null>(null)
+
+  // Load linked contacts
+  useEffect(() => {
+    setLoading(true)
+    fetch(`/api/properties/${propertyId}/contacts`)
+      .then(r => r.json())
+      .then(d => setLinks(d.contacts ?? []))
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [propertyId])
+
+  // Debounced contact search
+  useEffect(() => {
+    if (!searchQ.trim()) { setSearchRes([]); return }
+    const t = setTimeout(async () => {
+      setSearching(true)
+      try {
+        const res  = await fetch(`/api/contacts/search?q=${encodeURIComponent(searchQ)}`)
+        const data = await res.json()
+        setSearchRes(data.contacts ?? [])
+      } catch { /* ignore */ }
+      finally { setSearching(false) }
+    }, 300)
+    return () => clearTimeout(t)
+  }, [searchQ])
+
+  const linkExisting = async (contactId: string) => {
+    setSaving(true); setSaveErr(null)
+    try {
+      const res = await fetch(`/api/properties/${propertyId}/contacts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contact_id: contactId, relationship_type: linkRelType, is_primary: linkPrimary }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setSaveErr(data.error); return }
+      // Merge: update existing or prepend new
+      setLinks(prev => {
+        const exists = prev.find(l => l.contact.id === contactId)
+        const updated = data.link as LinkedContact
+        if (exists) return prev.map(l => l.contact.id === contactId ? updated : (linkPrimary ? { ...l, is_primary: false } : l))
+        return [updated, ...(linkPrimary ? prev.map(l => ({ ...l, is_primary: false })) : prev)]
+      })
+      setPanel('none'); setSearchQ(''); setSearchRes([])
+    } catch (e) { setSaveErr(e instanceof Error ? e.message : 'Failed') }
+    finally { setSaving(false) }
+  }
+
+  const createAndLink = async () => {
+    if (!newName.trim()) { setSaveErr('Name is required'); return }
+    setSaving(true); setSaveErr(null)
+    try {
+      const res = await fetch(`/api/properties/${propertyId}/contacts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newName.trim(), phone: newPhone.trim() || undefined,
+          email: newEmail.trim() || undefined, address: newAddr.trim() || undefined,
+          relationship_type: newRelType, is_primary: newPrimary,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setSaveErr(data.error); return }
+      const updated = data.link as LinkedContact
+      setLinks(prev => [updated, ...(newPrimary ? prev.map(l => ({ ...l, is_primary: false })) : prev)])
+      setPanel('none'); setNewName(''); setNewPhone(''); setNewEmail(''); setNewAddr('')
+    } catch (e) { setSaveErr(e instanceof Error ? e.message : 'Failed') }
+    finally { setSaving(false) }
+  }
+
+  const makePrimary = async (contactId: string) => {
+    const res = await fetch(`/api/properties/${propertyId}/contacts/${contactId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_primary: true }),
+    })
+    if (res.ok) setLinks(prev => prev.map(l => ({ ...l, is_primary: l.contact.id === contactId })))
+  }
+
+  const removeContact = async (contactId: string) => {
+    await fetch(`/api/properties/${propertyId}/contacts/${contactId}`, { method: 'DELETE' })
+    setLinks(prev => prev.filter(l => l.contact.id !== contactId))
+  }
+
+  const updateRelType = async (contactId: string, rel: string) => {
+    await fetch(`/api/properties/${propertyId}/contacts/${contactId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ relationship_type: rel }),
+    })
+    setLinks(prev => prev.map(l => l.contact.id === contactId ? { ...l, relationship_type: rel } : l))
+  }
+
+  const cardStyle: React.CSSProperties = {
+    backgroundColor: 'var(--c-card)',
+    border: '1px solid var(--c-border)',
+    borderRadius: '16px',
+    overflow: 'hidden',
+    marginBottom: '12px',
+  }
+
+  return (
+    <div>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="text-sm font-bold" style={{ color: 'var(--c-primary)' }}>Linked Contacts</h3>
+          <p className="text-[11px] mt-0.5" style={{ color: 'var(--c-text-3)' }}>
+            People and entities associated with this property lead
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => setPanel(p => p === 'link' ? 'none' : 'link')}
+            className="text-[11px] font-bold px-3 py-1.5 rounded-xl hover:opacity-80 transition-opacity"
+            style={{ backgroundColor: 'rgba(76,175,154,0.15)', color: '#4CAF9A', border: '1px solid rgba(76,175,154,0.35)' }}>
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/>
+            </svg>
+            Link Existing
+          </button>
+          <button onClick={() => setPanel(p => p === 'create' ? 'none' : 'create')}
+            className="text-[11px] font-bold px-3 py-1.5 rounded-xl hover:opacity-80 transition-opacity"
+            style={{ backgroundColor: 'var(--c-primary)', color: '#C9A84C' }}>
+            + New Contact
+          </button>
+        </div>
+      </div>
+
+      {/* Link Existing Panel */}
+      {panel === 'link' && (
+        <div style={{ ...cardStyle, marginBottom: '16px', border: '1px solid rgba(76,175,154,0.3)' }}>
+          <div className="px-4 pt-3 pb-2" style={{ borderBottom: '1px solid var(--c-border)', backgroundColor: 'rgba(76,175,154,0.05)' }}>
+            <p className="text-[11px] font-bold uppercase tracking-widest" style={{ color: '#4CAF9A' }}>Link Existing Contact</p>
+          </div>
+          <div className="p-4 space-y-3">
+            <input
+              autoFocus
+              type="text"
+              value={searchQ}
+              onChange={e => setSearchQ(e.target.value)}
+              placeholder="Search by name, phone, or email…"
+              className="w-full px-3 py-2 text-sm rounded-xl focus:outline-none"
+              style={{ backgroundColor: 'var(--c-hover)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }}
+            />
+            {searching && <p className="text-[11px]" style={{ color: 'var(--c-text-3)' }}>Searching…</p>}
+            {searchRes.length > 0 && (
+              <div className="space-y-1 max-h-48 overflow-y-auto">
+                {searchRes.map(c => (
+                  <div key={c.id} className="flex items-center justify-between px-3 py-2 rounded-xl hover:opacity-80 cursor-pointer"
+                    style={{ backgroundColor: 'var(--c-hover)', border: '1px solid var(--c-border)' }}
+                    onClick={() => linkExisting(c.id)}>
+                    <div>
+                      <p className="text-[12px] font-semibold" style={{ color: 'var(--c-primary)' }}>{c.name}</p>
+                      <p className="text-[10px]" style={{ color: 'var(--c-text-3)' }}>
+                        {[c.phone, c.email].filter(Boolean).join(' · ') || 'No contact info'}
+                      </p>
+                    </div>
+                    <span className="text-[10px] font-bold" style={{ color: '#4CAF9A' }}>Link →</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {searchQ.trim() && !searching && searchRes.length === 0 && (
+              <p className="text-[11px]" style={{ color: 'var(--c-text-3)' }}>No contacts found — try "New Contact" to create one.</p>
+            )}
+            <div className="flex items-center gap-3">
+              <div className="flex-1">
+                <label className="text-[10px] font-bold uppercase tracking-widest block mb-1" style={{ color: 'var(--c-text-3)' }}>Relationship</label>
+                <select value={linkRelType} onChange={e => setLinkRelType(e.target.value)}
+                  className="w-full text-sm px-2 py-1.5 rounded-lg focus:outline-none"
+                  style={{ backgroundColor: 'var(--c-hover)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }}>
+                  {RELATIONSHIP_TYPES.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+              </div>
+              <label className="flex items-center gap-1.5 text-[11px] font-semibold mt-4 cursor-pointer" style={{ color: 'var(--c-text-2)' }}>
+                <input type="checkbox" checked={linkPrimary} onChange={e => setLinkPrimary(e.target.checked)}
+                  style={{ accentColor: '#C9A84C' }} />
+                Primary
+              </label>
+            </div>
+            {saveErr && <p className="text-[11px]" style={{ color: '#ef4444' }}>{saveErr}</p>}
+          </div>
+        </div>
+      )}
+
+      {/* Create New Contact Panel */}
+      {panel === 'create' && (
+        <div style={{ ...cardStyle, marginBottom: '16px', border: '1px solid rgba(201,168,76,0.3)' }}>
+          <div className="px-4 pt-3 pb-2" style={{ borderBottom: '1px solid var(--c-border)', backgroundColor: 'rgba(201,168,76,0.05)' }}>
+            <p className="text-[11px] font-bold uppercase tracking-widest" style={{ color: '#C9A84C' }}>Create & Link New Contact</p>
+          </div>
+          <div className="p-4 grid grid-cols-2 gap-3">
+            {[
+              { label: 'Full Name *', val: newName,  set: setNewName,  ph: 'John Smith',          col: 'col-span-2' },
+              { label: 'Phone',       val: newPhone, set: setNewPhone, ph: '(954) 555-1234',      col: '' },
+              { label: 'Email',       val: newEmail, set: setNewEmail, ph: 'john@example.com',    col: '' },
+              { label: 'Address',     val: newAddr,  set: setNewAddr,  ph: '123 Main St, City FL', col: 'col-span-2' },
+            ].map(({ label, val, set, ph, col }) => (
+              <div key={label} className={col}>
+                <label className="text-[10px] font-bold uppercase tracking-widest block mb-1" style={{ color: 'var(--c-text-3)' }}>{label}</label>
+                <input type="text" value={val} onChange={e => set(e.target.value)} placeholder={ph}
+                  className="w-full px-3 py-2 text-sm rounded-xl focus:outline-none"
+                  style={{ backgroundColor: 'var(--c-hover)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }} />
+              </div>
+            ))}
+            <div>
+              <label className="text-[10px] font-bold uppercase tracking-widest block mb-1" style={{ color: 'var(--c-text-3)' }}>Relationship</label>
+              <select value={newRelType} onChange={e => setNewRelType(e.target.value)}
+                className="w-full text-sm px-2 py-1.5 rounded-lg focus:outline-none"
+                style={{ backgroundColor: 'var(--c-hover)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }}>
+                {RELATIONSHIP_TYPES.map(r => <option key={r} value={r}>{r}</option>)}
+              </select>
+            </div>
+            <div className="flex items-end pb-1">
+              <label className="flex items-center gap-1.5 text-[11px] font-semibold cursor-pointer" style={{ color: 'var(--c-text-2)' }}>
+                <input type="checkbox" checked={newPrimary} onChange={e => setNewPrimary(e.target.checked)}
+                  style={{ accentColor: '#C9A84C' }} />
+                Mark as primary contact
+              </label>
+            </div>
+            {saveErr && <p className="text-[11px] col-span-2" style={{ color: '#ef4444' }}>{saveErr}</p>}
+            <div className="col-span-2 flex gap-2 pt-1">
+              <button onClick={createAndLink} disabled={saving}
+                className="flex-1 py-2 text-sm font-bold rounded-xl hover:opacity-90 disabled:opacity-50"
+                style={{ backgroundColor: 'var(--c-primary)', color: '#C9A84C' }}>
+                {saving ? 'Saving…' : 'Create & Link'}
+              </button>
+              <button onClick={() => { setPanel('none'); setSaveErr(null) }}
+                className="px-4 py-2 text-sm rounded-xl hover:opacity-80"
+                style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Linked contacts list */}
+      {loading ? (
+        <div className="flex items-center justify-center py-10">
+          <div className="w-5 h-5 border-2 border-t-transparent rounded-full animate-spin"
+            style={{ borderColor: '#C9A84C', borderTopColor: 'transparent' }} />
+        </div>
+      ) : links.length === 0 ? (
+        <div className="text-center py-10" style={{ border: '1px dashed var(--c-border)', borderRadius: '16px' }}>
+          <div className="w-10 h-10 rounded-full flex items-center justify-center mx-auto mb-2"
+            style={{ backgroundColor: 'var(--c-hover)' }}>
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--c-text-3)' }}>
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
+            </svg>
+          </div>
+          <p className="text-sm font-semibold" style={{ color: 'var(--c-text-2)' }}>No contacts linked yet</p>
+          <p className="text-[11px] mt-1" style={{ color: 'var(--c-text-3)' }}>Link an existing contact or create a new one above</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {links.map(link => (
+            <div key={link.contact.id} style={cardStyle}>
+              {/* Contact header */}
+              <div className="flex items-start justify-between px-4 pt-3 pb-2.5">
+                <div className="flex items-start gap-3 min-w-0 flex-1">
+                  <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-sm font-bold"
+                    style={{ backgroundColor: 'rgba(201,168,76,0.15)', color: '#C9A84C' }}>
+                    {link.contact.name?.[0]?.toUpperCase() ?? '?'}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[13px] font-bold" style={{ color: 'var(--c-primary)' }}>{link.contact.name}</span>
+                      {link.is_primary && (
+                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+                          style={{ backgroundColor: 'rgba(201,168,76,0.2)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.4)' }}>
+                          PRIMARY
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                      <select
+                        value={link.relationship_type}
+                        onChange={e => updateRelType(link.contact.id, e.target.value)}
+                        onClick={e => e.stopPropagation()}
+                        className="text-[10px] font-bold px-2 py-0.5 rounded-full focus:outline-none"
+                        style={{ backgroundColor: 'rgba(107,159,212,0.12)', color: '#6B9FD4', border: '1px solid rgba(107,159,212,0.3)', cursor: 'pointer' }}>
+                        {RELATIONSHIP_TYPES.map(r => <option key={r} value={r}>{r}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+                {/* Actions */}
+                <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                  {!link.is_primary && (
+                    <button onClick={() => makePrimary(link.contact.id)}
+                      className="text-[10px] font-semibold px-2 py-1 rounded-lg hover:opacity-80"
+                      style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}
+                      title="Make primary contact">
+                      ★ Primary
+                    </button>
+                  )}
+                  <a href={`/contacts/${link.contact.id}`}
+                    className="text-[10px] font-semibold px-2 py-1 rounded-lg hover:opacity-80"
+                    style={{ backgroundColor: 'var(--c-hover)', color: '#6B9FD4', border: '1px solid var(--c-border)' }}>
+                    View →
+                  </a>
+                  <button onClick={() => removeContact(link.contact.id)}
+                    className="text-[10px] px-2 py-1 rounded-lg hover:opacity-80"
+                    style={{ backgroundColor: 'rgba(239,68,68,0.08)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.25)' }}
+                    title="Remove from this lead">
+                    ✕
+                  </button>
+                </div>
+              </div>
+
+              {/* Contact info */}
+              {(link.contact.phone || link.contact.email || link.contact.address) && (
+                <div className="flex flex-wrap gap-x-4 gap-y-1 px-4 pb-3">
+                  {link.contact.phone && (
+                    <a href={`tel:${link.contact.phone}`}
+                      className="text-[11px] font-semibold flex items-center gap-1 hover:opacity-80"
+                      style={{ color: '#4CAF9A' }}>
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                      </svg>
+                      {link.contact.phone}
+                    </a>
+                  )}
+                  {link.contact.email && (
+                    <a href={`mailto:${link.contact.email}`}
+                      className="text-[11px] font-semibold hover:opacity-80"
+                      style={{ color: '#6B9FD4' }}>
+                      {link.contact.email}
+                    </a>
+                  )}
+                  {link.contact.address && (
+                    <span className="text-[11px]" style={{ color: 'var(--c-text-3)' }}>
+                      {link.contact.address}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -1046,13 +1907,16 @@ function CommunicationsTab({ lead, messages, contact, notes, onNoteSaved }: {
   notes: Note[]
   onNoteSaved: (note: Note) => void
 }) {
+  const router = useRouter()
   const [sms, setSms]           = useState('')
   const [sending, setSending]   = useState(false)
+  const [smsError, setSmsError] = useState<string | null>(null)
   const [noteBody, setNoteBody] = useState('')
   const [savingNote, setSavingNote] = useState(false)
   const [addingToPipeline, setAddingToPipeline] = useState(false)
   const [pipelineResult, setPipelineResult] = useState<{ ok: boolean; contact_id?: string; already?: boolean } | null>(null)
   const [localMessages, setLocalMessages] = useState<Message[]>(messages)
+  const [showEmailComposer, setShowEmailComposer] = useState(false)
   const msgEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -1062,19 +1926,32 @@ function CommunicationsTab({ lead, messages, contact, notes, onNoteSaved }: {
   const sendSms = async () => {
     if (!contact || !sms.trim()) return
     setSending(true)
+    setSmsError(null)
     const tempId = `temp-${Date.now()}`
     const tempMsg: Message = { id: tempId, direction: 'outbound', body: sms.trim(), status: 'sending', created_at: new Date().toISOString() }
     setLocalMessages(prev => [...prev, tempMsg])
     setSms('')
 
-    const res = await fetch('/api/sms/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contactId: contact.id, body: tempMsg.body }),
-    })
-    const data = await res.json()
-    if (data.message?.id) {
-      setLocalMessages(prev => prev.map(m => m.id === tempId ? data.message : m))
+    try {
+      const res = await fetch('/api/sms/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contactId: contact.id, body: tempMsg.body }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        // Remove temp bubble, show error
+        setLocalMessages(prev => prev.filter(m => m.id !== tempId))
+        setSmsError(data.error ?? 'Failed to send. Check Twilio configuration.')
+      } else if (data.message?.id) {
+        setLocalMessages(prev => prev.map(m => m.id === tempId ? data.message : m))
+        if (data.warning) setSmsError(`Sent but Twilio reported: ${data.warning}`)
+      } else {
+        setLocalMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+      }
+    } catch {
+      setLocalMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+      setSmsError('Network error — message may not have sent.')
     }
     setSending(false)
   }
@@ -1082,17 +1959,19 @@ function CommunicationsTab({ lead, messages, contact, notes, onNoteSaved }: {
   const saveNote = async () => {
     if (!noteBody.trim()) return
     setSavingNote(true)
-    const res = await fetch(`/api/leads/${lead.id}/notes`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ body: noteBody.trim() }),
-    })
-    if (res.ok) {
-      const note = await res.json()
-      onNoteSaved(note)
-      setNoteBody('')
-    }
-    setSavingNote(false)
+    try {
+      const res = await fetch(`/api/leads/${lead.id}/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body: noteBody.trim() }),
+      })
+      if (res.ok) {
+        const note = await res.json()
+        onNoteSaved(note)
+        setNoteBody('')
+      }
+    } catch { /* network error — noteBody preserved so user can retry */ }
+    finally { setSavingNote(false) }
   }
 
   const addToPipeline = async () => {
@@ -1105,9 +1984,8 @@ function CommunicationsTab({ lead, messages, contact, notes, onNoteSaved }: {
     const data = await res.json()
     setPipelineResult(data)
     setAddingToPipeline(false)
-    if (data.ok && !data.already) {
-      // Reload page to get linked contact data
-      setTimeout(() => window.location.reload(), 1000)
+    if (data.ok && data.contact_id) {
+      setTimeout(() => router.push(`/contacts/${data.contact_id}`), 800)
     }
   }
 
@@ -1199,14 +2077,43 @@ function CommunicationsTab({ lead, messages, contact, notes, onNoteSaved }: {
             </p>
             <p className="text-xs" style={{ color: 'var(--c-text-2)' }}>{contact?.phone ?? lead.phone_1}</p>
           </div>
-          {contact && (
-            <a href={`/contacts/${contact.id}`}
-              className="text-xs font-semibold hover:underline"
-              style={{ color: '#C9A84C' }}>
-              View Contact →
-            </a>
-          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {contact?.email && (
+              <button
+                onClick={() => setShowEmailComposer(true)}
+                style={{
+                  padding: '5px 12px', borderRadius: 7, fontSize: 12, fontWeight: 600,
+                  backgroundColor: 'rgba(201,168,76,0.12)', color: '#C9A84C',
+                  border: '1px solid rgba(201,168,76,0.25)', cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', gap: 5,
+                }}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+                </svg>
+                Send Email
+              </button>
+            )}
+            {contact && (
+              <a href={`/contacts/${contact.id}`}
+                className="text-xs font-semibold hover:underline"
+                style={{ color: '#C9A84C' }}>
+                View Contact →
+              </a>
+            )}
+          </div>
         </div>
+
+        {showEmailComposer && contact?.email && (
+          <EmailComposer
+            defaultTo={contact.email}
+            contactId={contact.id}
+            leadId={lead.id}
+            contactName={contact.name}
+            propertyAddress={lead.address}
+            onClose={() => setShowEmailComposer(false)}
+          />
+        )}
 
         <div className="px-4 py-4 space-y-1 min-h-48 max-h-96 overflow-y-auto"
           style={{ backgroundColor: 'var(--c-card-alt)' }}>
@@ -1232,7 +2139,12 @@ function CommunicationsTab({ lead, messages, contact, notes, onNoteSaved }: {
                   <p className="text-[10px] mt-0.5"
                     style={{ color: msg.direction === 'outbound' ? 'rgba(255,255,255,0.4)' : 'var(--c-text-3)', textAlign: msg.direction === 'outbound' ? 'right' : 'left' }}>
                     {new Date(msg.created_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
-                    {msg.direction === 'outbound' && msg.status === 'sending' ? ' · Sending…' : ''}
+                    {msg.direction === 'outbound' && (
+                      msg.status === 'sending' ? <span> · Sending…</span>
+                      : msg.status === 'failed' ? <span style={{ color: '#f87171' }}> · Failed</span>
+                      : msg.status === 'mock'   ? <span style={{ color: '#f59e0b' }}> · Mock (Twilio not configured)</span>
+                      : null
+                    )}
                   </p>
                 </div>
               </div>
@@ -1241,23 +2153,43 @@ function CommunicationsTab({ lead, messages, contact, notes, onNoteSaved }: {
           <div ref={msgEndRef} />
         </div>
 
+        {/* Error banner */}
+        {smsError && (
+          <div className="px-4 py-2 flex items-center justify-between gap-2"
+            style={{ backgroundColor: 'rgba(239,68,68,0.08)', borderTop: '1px solid rgba(239,68,68,0.2)' }}>
+            <p className="text-xs" style={{ color: '#f87171' }}>{smsError}</p>
+            <button onClick={() => setSmsError(null)} className="text-xs" style={{ color: '#f87171' }}>✕</button>
+          </div>
+        )}
+
+        {/* No phone warning */}
+        {contact && !contact.phone && (
+          <div className="px-4 py-2"
+            style={{ backgroundColor: 'rgba(245,158,11,0.08)', borderTop: '1px solid rgba(245,158,11,0.2)' }}>
+            <p className="text-xs" style={{ color: '#f59e0b' }}>
+              No phone number on file — add one in the contact record to enable SMS.
+            </p>
+          </div>
+        )}
+
         <div className="flex gap-2 px-4 py-3" style={{ backgroundColor: 'var(--c-card)', borderTop: '1px solid var(--c-border)' }}>
           <input
             type="text"
             value={sms}
-            onChange={e => setSms(e.target.value)}
+            onChange={e => { setSms(e.target.value); if (smsError) setSmsError(null) }}
             onKeyDown={e => e.key === 'Enter' && sendSms()}
-            placeholder="Type a message…"
-            className="flex-1 text-sm px-3 py-2 rounded-xl focus:outline-none"
+            placeholder={contact?.phone ? 'Type a message…' : 'Add a phone number to send SMS'}
+            disabled={!contact?.phone}
+            className="flex-1 text-sm px-3 py-2 rounded-xl focus:outline-none disabled:opacity-40"
             style={{ backgroundColor: 'var(--c-input-bg)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }}
           />
           <button
             onClick={sendSms}
-            disabled={sending || !sms.trim() || !contact}
+            disabled={sending || !sms.trim() || !contact?.phone}
             className="px-4 py-2 rounded-xl text-sm font-bold transition-opacity hover:opacity-80 disabled:opacity-40"
             style={{ backgroundColor: '#0A1F44', color: '#C9A84C' }}
           >
-            Send
+            {sending ? '…' : 'Send'}
           </button>
         </div>
       </div>
@@ -1277,18 +2209,23 @@ function AIAnalysisTab({ lead, aiSummary: initialSummary }: { lead: Lead; aiSumm
   const generate = async (force = false) => {
     setGen(true)
     setError('')
-    const res = await fetch(`/api/leads/${lead.id}/ai`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ force }),
-    })
-    if (!res.ok) {
-      setError('AI analysis failed. Try again.')
-    } else {
-      const data = await res.json()
-      setSummary(data)
+    try {
+      const res = await fetch(`/api/leads/${lead.id}/ai`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force }),
+      })
+      if (!res.ok) {
+        setError('AI analysis failed. Try again.')
+      } else {
+        const data = await res.json()
+        setSummary(data)
+      }
+    } catch {
+      setError('Network error — please check your connection and try again.')
+    } finally {
+      setGen(false)
     }
-    setGen(false)
   }
 
   const motivationLabel = summary?.motivation
@@ -1469,6 +2406,10 @@ export default function LeadDetailClient({
   const [enrichMsg, setEnrichMsg]     = useState('')
   const [deepEnriching, setDeepEnriching] = useState(false)
   const [deepEnrichMsg, setDeepEnrichMsg] = useState('')
+  const [leadTypeId,  setLeadTypeId]  = useState<string>(lead.lead_type_id ?? '')
+  const [verticalId,  setVerticalId]  = useState<string>(lead.vertical_id  ?? '')
+  const [leadTypes,   setLeadTypes]   = useState<{ id: string; name: string; color: string }[]>([])
+  const [verticals,   setVerticals]   = useState<{ id: string; name: string; color: string }[]>([])
 
   // Defined early so useEffect below can reference it
   // silent=true suppresses error messages (used for auto-enrich on mount)
@@ -1521,6 +2462,15 @@ export default function LeadDetailClient({
     const isMD   = initialLead.county === 'miami-dade'
     const notYet = !initialLead.enriched_at
     if (isMD && notYet) enrichLead(false, true)   // silent — no error toast on first load
+
+    // Load lead types and verticals for the selectors
+    Promise.all([
+      fetch('/api/lead-types').then(r => r.ok ? r.json() : []),
+      fetch('/api/business-verticals').then(r => r.ok ? r.json() : []),
+    ]).then(([types, verts]) => {
+      setLeadTypes((types as { id: string; name: string; color: string; is_active: boolean }[]).filter(t => t.is_active))
+      setVerticals((verts as { id: string; name: string; color: string; is_active: boolean }[]).filter(v => v.is_active))
+    })
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const ds    = daysSince(lead.file_date)
@@ -1536,6 +2486,24 @@ export default function LeadDetailClient({
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pipeline_stage: newStage || null }),
+    })
+  }
+
+  const updateLeadType = async (val: string) => {
+    setLeadTypeId(val)
+    await fetch(`/api/leads/${lead.id}/stage`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lead_type_id: val || null }),
+    })
+  }
+
+  const updateVertical = async (val: string) => {
+    setVerticalId(val)
+    await fetch(`/api/leads/${lead.id}/stage`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vertical_id: val || null }),
     })
   }
 
@@ -1595,7 +2563,9 @@ export default function LeadDetailClient({
     { key: 'foreclosure',     label: 'Foreclosure' },
     { key: 'mortgage',        label: 'Mortgage' },
     { key: 'comps',           label: 'Comps' },
+    { key: 'contacts',        label: '👤 Contacts' },
     { key: 'communications',  label: 'Communications' },
+    { key: 'documents',       label: 'Documents' },
     { key: 'ai',              label: '✦ AI Analysis' },
   ]
 
@@ -1622,6 +2592,38 @@ export default function LeadDetailClient({
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
               </svg>
             </button>
+
+            {/* Lead type selector */}
+            {leadTypes.length > 0 && (
+              <select
+                value={leadTypeId}
+                onChange={e => updateLeadType(e.target.value)}
+                className="text-xs font-semibold px-2.5 py-1.5 rounded-lg focus:outline-none"
+                style={{ backgroundColor: 'rgba(255,255,255,0.1)', color: leadTypeId ? '#C9A84C' : 'rgba(255,255,255,0.5)', border: '1px solid rgba(255,255,255,0.2)' }}
+                title="Lead Type"
+              >
+                <option value="">Lead Type</option>
+                {leadTypes.map(t => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            )}
+
+            {/* Vertical selector */}
+            {verticals.length > 0 && (
+              <select
+                value={verticalId}
+                onChange={e => updateVertical(e.target.value)}
+                className="text-xs font-semibold px-2.5 py-1.5 rounded-lg focus:outline-none"
+                style={{ backgroundColor: 'rgba(255,255,255,0.1)', color: verticalId ? '#7B8FD4' : 'rgba(255,255,255,0.5)', border: '1px solid rgba(255,255,255,0.2)' }}
+                title="Business Vertical"
+              >
+                <option value="">Vertical</option>
+                {verticals.map(v => (
+                  <option key={v.id} value={v.id}>{v.name}</option>
+                ))}
+              </select>
+            )}
 
             {/* Stage selector */}
             <select
@@ -1653,10 +2655,12 @@ export default function LeadDetailClient({
 
           {/* Distress badges */}
           <div className="flex flex-wrap gap-2 mb-4">
-            <span className="px-2.5 py-1 rounded-full text-xs font-bold"
-              style={{ backgroundColor: 'rgba(224,123,106,0.2)', color: '#E07B6A' }}>
-              {lead.foreclosure_type === 'P' ? 'Pre-Foreclosure' : 'Foreclosure'}
-            </span>
+            {(lead.is_pre_foreclosure || lead.is_foreclosure) && (
+              <span className="px-2.5 py-1 rounded-full text-xs font-bold"
+                style={{ backgroundColor: 'rgba(224,123,106,0.2)', color: '#E07B6A' }}>
+                {lead.foreclosure_type === 'P' ? 'Pre-Foreclosure' : 'Foreclosure'}
+              </span>
+            )}
             {lead.equity_tier && (
               <span className="px-2.5 py-1 rounded-full text-xs font-bold"
                 style={{ backgroundColor: `${eClr}25`, color: eClr }}>
@@ -1681,6 +2685,15 @@ export default function LeadDetailClient({
                 ✓ In Pipeline
               </span>
             )}
+            {leadTypeId && leadTypes.length > 0 && (() => {
+              const lt = leadTypes.find(t => t.id === leadTypeId)
+              return lt ? (
+                <span className="px-2.5 py-1 rounded-full text-xs font-bold"
+                  style={{ backgroundColor: `${lt.color}25`, color: lt.color, border: `1px solid ${lt.color}50` }}>
+                  {lt.name}
+                </span>
+              ) : null
+            })()}
           </div>
 
           {/* Key stats */}
@@ -1802,6 +2815,7 @@ export default function LeadDetailClient({
         {tab === 'foreclosure'    && <ForeclosureTab lead={lead} propertyId={lead.property_id ?? lead.id} />}
         {tab === 'mortgage'       && <MortgageTab lead={lead} />}
         {tab === 'comps'          && <CompsTab lead={lead} comps={comps} />}
+        {tab === 'contacts'       && <ContactsTab propertyId={lead.property_id ?? lead.id} />}
         {tab === 'communications' && (
           <CommunicationsTab
             lead={lead}
@@ -1810,6 +2824,11 @@ export default function LeadDetailClient({
             notes={notes}
             onNoteSaved={note => setNotes(prev => [note, ...prev])}
           />
+        )}
+        {tab === 'documents' && (
+          <Suspense fallback={null}>
+            <DocumentsTab leadId={lead.id} propertyId={lead.property_id ?? undefined} />
+          </Suspense>
         )}
         {tab === 'ai' && <AIAnalysisTab lead={lead} aiSummary={aiSummary} />}
       </div>

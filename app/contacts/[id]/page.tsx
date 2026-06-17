@@ -25,7 +25,7 @@ export default async function ContactDetailPage({ params }: { params: Promise<{ 
 
   const { data: deals } = await supabase
     .from('deals')
-    .select('id, address, status, arv, offer_price, created_at')
+    .select('id, address, status, arv, offer_price, closing_date, created_at')
     .eq('contact_id', id)
     .order('created_at', { ascending: false })
 

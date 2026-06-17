@@ -11,6 +11,9 @@ interface Contact {
   address: string
 }
 
+interface PipelineStage { id: string; name: string; position: number }
+interface Pipeline { id: string; name: string; pipeline_stages: PipelineStage[] }
+
 export default function NewDealClient({
   contacts,
   defaultContactId,
@@ -22,11 +25,20 @@ export default function NewDealClient({
   const supabase = createClient()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [pipelines, setPipelines] = useState<Pipeline[]>([])
+
+  useEffect(() => {
+    fetch('/api/pipelines').then(r => r.ok ? r.json() : []).then(data => {
+      setPipelines((data as Pipeline[]).filter(p => (p as Pipeline & { is_active: boolean }).is_active !== false))
+    })
+  }, [])
 
   const [form, setForm] = useState({
     address: '',
     contact_id: defaultContactId || '',
     status: 'Lead',
+    pipeline_id: '',
+    pipeline_stage_id: '',
     arv: '',
     repair_cost: '',
     closing_cost: '',
@@ -35,6 +47,8 @@ export default function NewDealClient({
     notes: '',
     source: '',
   })
+
+  const selectedPipelineStages = pipelines.find(p => p.id === form.pipeline_id)?.pipeline_stages ?? []
 
   // Auto-fill address from selected contact
   useEffect(() => {
@@ -56,7 +70,13 @@ export default function NewDealClient({
     : null
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
-    setForm(prev => ({ ...prev, [e.target.name]: e.target.value }))
+    const { name, value } = e.target
+    setForm(prev => ({
+      ...prev,
+      [name]: value,
+      // Clear stage when pipeline changes
+      ...(name === 'pipeline_id' ? { pipeline_stage_id: '' } : {}),
+    }))
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -68,6 +88,8 @@ export default function NewDealClient({
       address: form.address,
       contact_id: form.contact_id || null,
       status: form.status,
+      pipeline_id: form.pipeline_id || null,
+      pipeline_stage_id: form.pipeline_stage_id || null,
       arv: arv || null,
       repair_cost: repairs || null,
       closing_cost: closing || null,
@@ -125,6 +147,26 @@ export default function NewDealClient({
                 ))}
               </select>
             </div>
+            {pipelines.length > 0 && (
+              <div>
+                <label style={{ color: '#0A1F44' }} className="block text-sm font-semibold mb-1.5">Pipeline</label>
+                <select name="pipeline_id" value={form.pipeline_id} onChange={handleChange}
+                  className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none text-gray-800 bg-white">
+                  <option value="">— None —</option>
+                  {pipelines.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              </div>
+            )}
+            {selectedPipelineStages.length > 0 && (
+              <div>
+                <label style={{ color: '#0A1F44' }} className="block text-sm font-semibold mb-1.5">Stage</label>
+                <select name="pipeline_stage_id" value={form.pipeline_stage_id} onChange={handleChange}
+                  className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none text-gray-800 bg-white">
+                  <option value="">— None —</option>
+                  {selectedPipelineStages.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </div>
+            )}
             <div>
               <label style={{ color: '#0A1F44' }} className="block text-sm font-semibold mb-1.5">Source</label>
               <input name="source" value={form.source} onChange={handleChange}

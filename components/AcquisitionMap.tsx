@@ -75,7 +75,7 @@ const MAP_STYLES: google.maps.MapTypeStyle[] = [
   { featureType: 'water',          elementType: 'labels.text.stroke',stylers: [{ color: '#071829' }, { weight: 2 }] },
 ]
 
-const MAP_OPTIONS: google.maps.MapOptions = {
+const BASE_MAP_OPTIONS: google.maps.MapOptions = {
   styles:            MAP_STYLES,
   disableDefaultUI:  false,
   zoomControl:       true,
@@ -83,7 +83,6 @@ const MAP_OPTIONS: google.maps.MapOptions = {
   streetViewControl: false,
   fullscreenControl: false,
   clickableIcons:    false,
-  // Disable all default gestures that conflict with draw mode
 }
 
 export type LayerKey =
@@ -181,9 +180,10 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
   // ── Draw state ────────────────────────────────────────────────────────────
   type DrawMode = 'idle' | 'polygon' | 'rectangle' | 'circle'
   const [drawMode, setDrawMode]         = useState<DrawMode>('idle')
-  const [polyVerts, setPolyVerts]       = useState<LatLng[]>([])   // polygon vertices in progress
-  const [drawStart, setDrawStart]       = useState<LatLng | null>(null)   // rect/circle first click
-  const [mousePos,  setMousePos]        = useState<LatLng | null>(null)   // mouse for previews
+  const [polyVerts, setPolyVerts]       = useState<LatLng[]>([])
+  const [drawStart, setDrawStart]       = useState<LatLng | null>(null)
+  const [mousePos,  setMousePos]        = useState<LatLng | null>(null)
+  const [isDragging, setIsDragging]     = useState(false)           // rect/circle drag in progress
   const [currentZone, setCurrentZone]   = useState<DrawnZone | null>(null)
 
   // ── Territories ───────────────────────────────────────────────────────────
@@ -213,43 +213,44 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
     setPolyVerts([])
     setDrawStart(null)
     setMousePos(null)
+    setIsDragging(false)
     onZoneDrawn?.(null)
   }, [onZoneDrawn])
 
-  // ── Map click handler (drives all draw modes) ─────────────────────────────
+  // ── Polygon: click to add vertices ────────────────────────────────────────
   const handleMapClick = useCallback((e: google.maps.MapMouseEvent) => {
-    if (drawMode === 'idle' || !e.latLng) return
+    if (drawMode !== 'polygon' || !e.latLng) return
     const pt: LatLng = { lat: e.latLng.lat(), lng: e.latLng.lng() }
-
-    if (drawMode === 'polygon') {
-      // Close if clicking near first vertex (≤ 0.002° / ~200m) and have ≥3 verts
-      if (polyVerts.length >= 3 && latlngDist(pt, polyVerts[0]) < 0.002) {
-        commitZone({ type: 'polygon', path: polyVerts })
-        return
-      }
-      setPolyVerts(prev => [...prev, pt])
-
-    } else if (drawMode === 'rectangle') {
-      if (!drawStart) {
-        setDrawStart(pt)
-      } else {
-        commitZone({ type: 'rectangle', bounds: rectBounds(drawStart, pt) })
-      }
-
-    } else if (drawMode === 'circle') {
-      if (!drawStart) {
-        setDrawStart(pt)
-      } else {
-        commitZone({
-          type:   'circle',
-          center: drawStart,
-          radius: latLngRadiusMetres(drawStart, pt),
-        })
-      }
+    if (polyVerts.length >= 3 && latlngDist(pt, polyVerts[0]) < 0.002) {
+      commitZone({ type: 'polygon', path: polyVerts })
+      return
     }
-  }, [drawMode, polyVerts, drawStart, commitZone])
+    setPolyVerts(prev => [...prev, pt])
+  }, [drawMode, polyVerts, commitZone])
 
-  // ── Mouse-move for draw preview ───────────────────────────────────────────
+  // ── Rectangle / Circle: mousedown starts the drag ─────────────────────────
+  const handleMouseDown = useCallback((e: google.maps.MapMouseEvent) => {
+    if ((drawMode !== 'rectangle' && drawMode !== 'circle') || !e.latLng) return
+    const pt: LatLng = { lat: e.latLng.lat(), lng: e.latLng.lng() }
+    setDrawStart(pt)
+    setIsDragging(true)
+  }, [drawMode])
+
+  // ── Rectangle / Circle: mouseup commits the shape ─────────────────────────
+  const handleMouseUp = useCallback((e: google.maps.MapMouseEvent) => {
+    if (!isDragging || !drawStart || !e.latLng) return
+    const pt: LatLng = { lat: e.latLng.lat(), lng: e.latLng.lng() }
+    // Ignore tiny accidental drags (< ~50m)
+    if (latlngDist(drawStart, pt) < 0.0004) { setIsDragging(false); return }
+    if (drawMode === 'rectangle') {
+      commitZone({ type: 'rectangle', bounds: rectBounds(drawStart, pt) })
+    } else if (drawMode === 'circle') {
+      commitZone({ type: 'circle', center: drawStart, radius: latLngRadiusMetres(drawStart, pt) })
+    }
+    setIsDragging(false)
+  }, [isDragging, drawStart, drawMode, commitZone])
+
+  // ── Mouse-move: update preview position ───────────────────────────────────
   const handleMouseMove = useCallback((e: google.maps.MapMouseEvent) => {
     if (drawMode === 'idle' || !e.latLng) return
     setMousePos({ lat: e.latLng.lat(), lng: e.latLng.lng() })
@@ -307,6 +308,17 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
     ? [...polyVerts, mousePos]
     : polyVerts
 
+  // ── Dynamic map options ────────────────────────────────────────────────────
+  // Polygon: keep pan + scroll so the user can navigate between vertex clicks.
+  // Rectangle/Circle: lock everything so drag draws the shape, not pans the map.
+  const drawingLocked = drawMode === 'rectangle' || drawMode === 'circle'
+  const mapOptions: google.maps.MapOptions = {
+    ...BASE_MAP_OPTIONS,
+    draggable:       !drawingLocked,
+    scrollwheel:     !drawingLocked,
+    gestureHandling: drawingLocked ? 'none' : 'cooperative',
+  }
+
   // ── Cursors ───────────────────────────────────────────────────────────────
   const cursor = drawMode === 'idle' ? 'default' : 'crosshair'
 
@@ -350,9 +362,11 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
           mapContainerStyle={{ width: '100%', height: '100%' }}
           center={SOUTH_FLORIDA_CENTER}
           zoom={DEFAULT_ZOOM}
-          options={MAP_OPTIONS}
+          options={mapOptions}
           onLoad={onMapLoad}
           onClick={handleMapClick}
+          onMouseDown={handleMouseDown}
+          onMouseUp={handleMouseUp}
           onMouseMove={handleMouseMove}
         >
           {/* ── Completed zone overlays ─── */}
@@ -546,8 +560,8 @@ export default function AcquisitionMap({ onZoneDrawn, activeLayers, className }:
                       ? `${polyVerts.length} vertex${polyVerts.length > 1 ? 'es' : ''} — keep clicking`
                       : 'Click near first vertex to close, or press Complete'
                   : drawMode === 'rectangle'
-                    ? drawStart ? 'Click opposite corner to complete' : 'Click first corner'
-                    : drawStart ? 'Click any point to set radius' : 'Click to set center'
+                    ? isDragging ? 'Release to complete rectangle' : 'Click and drag to draw rectangle'
+                    : isDragging ? 'Release to set radius' : 'Click and drag to draw circle'
               )}
             </span>
           </div>

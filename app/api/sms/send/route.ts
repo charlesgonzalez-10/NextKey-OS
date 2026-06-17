@@ -1,4 +1,5 @@
 import { createClient } from '@/lib/supabase/server'
+import { serviceClient } from '@/lib/supabase-service'
 import { NextRequest, NextResponse } from 'next/server'
 
 function normalizePhone(raw: string): string {
@@ -18,8 +19,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'contactId and body are required' }, { status: 400 })
   }
 
-  // Get contact phone
-  const { data: contact, error: cErr } = await supabase
+  const service = serviceClient
+
+  // Get contact phone — use service client to bypass RLS
+  const { data: contact, error: cErr } = await service
     .from('contacts')
     .select('id, name, phone')
     .eq('id', contactId)
@@ -28,13 +31,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Contact not found or has no phone number' }, { status: 404 })
   }
 
-  const accountSid = process.env.TWILIO_ACCOUNT_SID
-  const authToken  = process.env.TWILIO_AUTH_TOKEN
-  const fromNumber = process.env.TWILIO_PHONE_NUMBER
+  const accountSid      = process.env.TWILIO_ACCOUNT_SID
+  const authToken       = process.env.TWILIO_AUTH_TOKEN
+  const fromNumber      = process.env.TWILIO_PHONE_NUMBER
+  const messagingService = process.env.TWILIO_MESSAGING_SERVICE_SID
 
   // If Twilio not configured, save as "mock" message so UI works in dev
   if (!accountSid || !authToken || !fromNumber) {
-    const { data: msg } = await supabase.from('messages').insert({
+    const { data: msg } = await service.from('messages').insert({
       contact_id: contactId,
       direction: 'outbound',
       body: body.trim(),
@@ -47,7 +51,7 @@ export async function POST(req: NextRequest) {
 
   const toNumber = normalizePhone(contact.phone)
 
-  // Send via Twilio REST (avoid importing twilio in edge — use fetch)
+  // Send via Twilio REST
   const twilioRes = await fetch(
     `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
     {
@@ -56,7 +60,11 @@ export async function POST(req: NextRequest) {
         'Content-Type': 'application/x-www-form-urlencoded',
         'Authorization': `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`,
       },
-      body: new URLSearchParams({ To: toNumber, From: fromNumber, Body: body.trim() }).toString(),
+      body: new URLSearchParams({
+        To: toNumber,
+        ...(messagingService ? { MessagingServiceSid: messagingService } : { From: fromNumber }),
+        Body: body.trim(),
+      }).toString(),
     }
   )
 
@@ -64,8 +72,8 @@ export async function POST(req: NextRequest) {
   const twilioFailed = !twilioRes.ok
   const twilioError = twilioFailed ? (twilioData.message ?? 'Twilio error') : null
 
-  // Always save to DB — status reflects whether Twilio accepted it
-  const { data: msg, error: mErr } = await supabase.from('messages').insert({
+  // Always save to DB via service client — bypasses RLS
+  const { data: msg, error: mErr } = await service.from('messages').insert({
     contact_id: contactId,
     direction: 'outbound',
     body: body.trim(),

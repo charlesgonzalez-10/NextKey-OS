@@ -1,8 +1,11 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
+import dynamic from 'next/dynamic'
+
+const EmailPanel = dynamic(() => import('./email-panel'), { ssr: false })
 
 interface Convo {
   contactId: string
@@ -190,8 +193,40 @@ export default function InboxClient({
   const hasInbound = safeThread.some(m => m.direction === 'inbound')
   const twilioMissing = safeThread.some(m => m.status === 'mock')
 
+  const [inboxTab, setInboxTab] = useState<'sms' | 'email'>('sms')
+
   return (
-    <div className="flex h-[calc(100vh-48px)] md:h-screen" style={{ color: 'var(--c-primary)' }}>
+    <div style={{ color: 'var(--c-primary)', display: 'flex', flexDirection: 'column', height: 'calc(100vh - 48px)', overflow: 'hidden' }} className="md:h-screen md:overflow-hidden">
+      {/* Tab bar */}
+      <div style={{ display: 'flex', borderBottom: '1px solid var(--c-border)', backgroundColor: 'var(--c-card)', flexShrink: 0 }}>
+        {(['sms', 'email'] as const).map(t => (
+          <button key={t} onClick={() => setInboxTab(t)} style={{
+            padding: '12px 20px', fontSize: 13, fontWeight: 600,
+            color: inboxTab === t ? '#C9A84C' : 'var(--c-text-2)',
+            borderBottom: inboxTab === t ? '2px solid #C9A84C' : '2px solid transparent',
+            backgroundColor: 'transparent', border: 'none', cursor: 'pointer',
+            display: 'flex', alignItems: 'center', gap: 7,
+          }}>
+            {t === 'sms' ? (
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M8 12h.01M12 12h.01M16 12h.01M21 3H3c-.552 0-1 .448-1 1v14c0 .552.448 1 1 1h5l3 3 3-3h7c.552 0 1-.448 1-1V4c0-.552-.448-1-1-1z" />
+              </svg>
+            ) : (
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+              </svg>
+            )}
+            {t === 'sms' ? 'SMS' : 'Email'}
+          </button>
+        ))}
+      </div>
+
+      {inboxTab === 'email' ? (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
+          <EmailPanel />
+        </div>
+      ) : (
+    <div className="flex flex-1 overflow-hidden" style={{ color: 'var(--c-primary)' }}>
 
       {/* ── Conversation list — full screen on mobile, 300px panel on desktop ── */}
       <div
@@ -335,7 +370,7 @@ export default function InboxClient({
                     <p className="leading-relaxed">{msg.body}</p>
                     <p className="text-xs mt-1 opacity-50">
                       {msg.status === 'sending' ? 'Sending…'
-                        : msg.status === 'failed' ? '⚠️ Not delivered'
+                        : msg.status === 'failed' ? 'Not delivered'
                         : timeAgo(msg.created_at)}
                     </p>
                   </div>
@@ -357,7 +392,7 @@ export default function InboxClient({
                   >
                     {aiLoading
                       ? <><svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Generating…</>
-                      : '✨ AI Suggest Reply'
+                      : 'AI Suggest Reply'
                     }
                   </button>
                 </div>
@@ -389,5 +424,8 @@ export default function InboxClient({
         )}
       </div>
     </div>
+      )}
+    </div>
   )
 }
+

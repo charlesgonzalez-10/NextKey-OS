@@ -278,9 +278,9 @@ export default function ScraperClient({
     }
   }
 
-  const daysUntilREIFax = Math.ceil(
+  const daysUntilREIFax = Math.max(0, Math.ceil(
     (new Date('2026-06-18').getTime() - Date.now()) / (1000 * 60 * 60 * 24)
-  )
+  ))
 
   // ─── Renders ────────────────────────────────────────────────────────────────
 
@@ -317,7 +317,7 @@ export default function ScraperClient({
       case 'plaintiff':          return <span className="text-xs">{lead.plaintiff || '—'}</span>
       case 'lender_name':        return <span className="text-xs">{lead.lender_name || '—'}</span>
       case 'foreclosure_type':   return <span className="text-xs">{lead.foreclosure_type === 'P' ? 'Pre-FC' : lead.foreclosure_type || '—'}</span>
-      case 'multiple_liens':     return <span className="text-xs">{lead.multiple_liens ? '⚠ Yes' : '—'}</span>
+      case 'multiple_liens':     return <span className="text-xs">{lead.multiple_liens ? 'Yes' : '—'}</span>
       case 'phone_1':            return <span className="text-xs">{lead.phone_1 || '—'}</span>
       case 'phone_2':            return <span className="text-xs">{lead.phone_2 || '—'}</span>
       case 'phone_3':            return <span className="text-xs">{lead.phone_3 || '—'}</span>
@@ -347,13 +347,15 @@ export default function ScraperClient({
           <h1 style={{ color: '#0A1F44' }} className="text-xl md:text-3xl font-bold">County Records Scraper</h1>
           <p className="text-gray-400 mt-1 text-xs md:text-sm">Automated Florida lis pendens — replaces REIFax</p>
         </div>
-        {/* REIFax deadline badge */}
-        <div style={{ backgroundColor: daysUntilREIFax <= 14 ? '#E07B6A20' : '#C9A84C20', borderColor: daysUntilREIFax <= 14 ? '#E07B6A' : '#C9A84C' }}
-          className="border rounded-xl px-3 py-2 md:px-4 text-center">
-          <p className="text-xs font-semibold" style={{ color: daysUntilREIFax <= 14 ? '#E07B6A' : '#C9A84C' }}>REIFax</p>
-          <p className="text-xl md:text-2xl font-bold" style={{ color: daysUntilREIFax <= 14 ? '#E07B6A' : '#C9A84C' }}>{daysUntilREIFax}d</p>
-          <p className="text-xs text-gray-400 hidden sm:block">June 18, 2026</p>
-        </div>
+        {/* REIFax deadline badge — hidden once past deadline */}
+        {daysUntilREIFax > 0 && (
+          <div style={{ backgroundColor: daysUntilREIFax <= 14 ? '#E07B6A20' : '#C9A84C20', borderColor: daysUntilREIFax <= 14 ? '#E07B6A' : '#C9A84C' }}
+            className="border rounded-xl px-3 py-2 md:px-4 text-center">
+            <p className="text-xs font-semibold" style={{ color: daysUntilREIFax <= 14 ? '#E07B6A' : '#C9A84C' }}>REIFax</p>
+            <p className="text-xl md:text-2xl font-bold" style={{ color: daysUntilREIFax <= 14 ? '#E07B6A' : '#C9A84C' }}>{daysUntilREIFax}d</p>
+            <p className="text-xs text-gray-400 hidden sm:block">June 18, 2026</p>
+          </div>
+        )}
       </div>
 
       {/* Stats row */}

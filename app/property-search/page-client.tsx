@@ -22,6 +22,25 @@ import PropertySearchPanel, {
 } from '@/components/PropertySearchPanel'
 import type { DrawnZone } from '@/components/AcquisitionMap'
 
+// ─── Enrichment data shape (from /api/property-search/enrich) ─────────────────
+
+interface EnrichmentData {
+  equity_percent:   number | null
+  estimated_equity: number | null
+  open_mortgage:    number | null
+  estimated_value:  number | null
+  suggested_rent:   number | null
+  free_clear:       boolean
+  high_equity:      boolean
+  absentee_owner:   boolean
+  vacant:           boolean
+  pre_foreclosure:  boolean
+  foreclosure:      boolean
+  auction:          boolean
+  tax_lien:         boolean
+  mls_active:       boolean
+}
+
 // Lazy-load the map so it doesn't block initial paint
 const AcquisitionMap = lazy(() => import('@/components/AcquisitionMap'))
 
@@ -139,25 +158,59 @@ function LookupResultCard({
   saved,
   onSave,
   onClear,
+  enrichData,
+  enrichLoading,
+  onEnrich,
 }: {
-  result:   PropertySearchResult
-  saved:    boolean
-  onSave:   () => void
-  onClear:  () => void
+  result:        PropertySearchResult
+  saved:         boolean
+  onSave:        () => void
+  onClear:       () => void
+  enrichData:    EnrichmentData | null
+  enrichLoading: boolean
+  onEnrich:      () => void
 }) {
   const d = result.distress
 
-  // Distress flag list
-  const flags: string[] = []
-  if (d?.foreclosure_type === 'P') flags.push('Pre-Foreclosure')
-  if (d?.foreclosure_type === 'F') flags.push('Foreclosure')
-  if (d?.foreclosure_type === 'A') flags.push('Auction')
+  // Verified foreclosure = has case number (actual lis pendens / OR record)
+  // Unverified = flag exists in DB but no case number (may be REAPI estimate)
+  const flags: Array<{ label: string; verified: boolean }> = []
+  if (d?.foreclosure_type === 'P') flags.push({ label: 'Pre-Foreclosure', verified: !!d.case_number })
+  if (d?.foreclosure_type === 'F') flags.push({ label: 'Foreclosure',     verified: !!d.case_number })
+  if (d?.foreclosure_type === 'A') flags.push({ label: 'Auction',         verified: !!d.case_number })
 
-  // Source badge colour
-  const srcColor =
-    result.source_type === 'paid'     ? '#4CAF9A' :
-    result.source_type === 'internal' ? '#6B9FD4' :
-    '#C9A84C'
+  // Consistent source name regardless of which adapter returned the result
+  const sourceLabel =
+    result.source_display ??
+    (result.source === 'reapi'          ? 'REAPI'            :
+     result.source === 'miami-dade-pa'  ? 'Miami-Dade PA'    :
+     result.source === 'broward-pa'     ? 'BCPA'             :
+     result.source === 'palm-beach-pa'  ? 'Palm Beach PA'    :
+     result.source?.includes('pa')      ? 'County PA'        : 'REAPI')
+
+  // For REAPI results the enrichment data is already embedded in raw
+  const rawR = result.source === 'reapi' ? (result.raw as Record<string, unknown>) : null
+  const equityPct  = enrichData?.equity_percent  ?? (rawR?._equity_percent  as number | null)  ?? null
+  const rentEst    = enrichData?.suggested_rent  ?? (rawR?._suggested_rent  as number | null)  ?? null
+  const freeClear  = enrichData?.free_clear      ?? (rawR?._free_clear      as boolean)        ?? false
+  const highEquity = enrichData?.high_equity     ?? (rawR?._high_equity     as boolean)        ?? false
+  const vacantFlag = enrichData?.vacant          ?? (rawR?._vacant          as boolean)        ?? false
+  const reapiPreFC = enrichData?.pre_foreclosure ?? (rawR?._pre_foreclosure as boolean)        ?? false
+  const reapiFC    = enrichData?.foreclosure     ?? (rawR?._foreclosure     as boolean)        ?? false
+
+  // REAPI signals — only show if NOT already covered by a verified DB record
+  const dbVerifiedPreFC = d?.foreclosure_type === 'P' && d?.case_number
+  const dbVerifiedFC    = d?.foreclosure_type === 'F' && d?.case_number
+  const reapiSignals: string[] = []
+  if (reapiPreFC && !dbVerifiedPreFC) reapiSignals.push('Pre-FC flag')
+  if (reapiFC    && !dbVerifiedFC)    reapiSignals.push('Foreclosure flag')
+  if (freeClear)                      reapiSignals.push('Free & Clear')
+  if (highEquity)                     reapiSignals.push('High Equity')
+  if (vacantFlag)                     reapiSignals.push('Vacant')
+
+  const showEnrichSection = enrichData !== null || result.source === 'reapi'
+  // Show Deep Enrich button only for PA-sourced properties not yet enriched
+  const showEnrichBtn = result.source !== 'reapi' && !enrichData
 
   // Google Maps link
   const gmaps = `https://www.google.com/maps/search/${encodeURIComponent(
@@ -180,24 +233,30 @@ function LookupResultCard({
           style={{ color: 'var(--c-text-3)', backgroundColor: 'var(--c-hover)' }}>✕</button>
       </div>
 
-      {/* Source + distress flags */}
+      {/* Source badge + distress flags */}
       <div className="flex flex-wrap items-center gap-1.5 px-4 pb-2.5">
-        {result.source_display && (
-          <span className="text-[9px] font-bold px-2 py-0.5 rounded-full"
-            style={{ backgroundColor: `${srcColor}18`, color: srcColor, border: `1px solid ${srcColor}40` }}>
-            {result.source_display}
-          </span>
-        )}
+        {/* Data source */}
+        <span className="text-[9px] font-bold px-2 py-0.5 rounded-full"
+          style={{ backgroundColor: 'rgba(107,159,212,0.12)', color: '#6B9FD4', border: '1px solid rgba(107,159,212,0.3)' }}>
+          {sourceLabel}
+        </span>
+
         {result.absentee_owner && (
           <span className="text-[9px] font-bold px-2 py-0.5 rounded-full"
             style={{ backgroundColor: 'rgba(201,168,76,0.12)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.3)' }}>
             Absentee Owner
           </span>
         )}
+
+        {/* Foreclosure badges — red when verified by case number, amber when unverified */}
         {flags.map(f => (
-          <span key={f} className="text-[9px] font-bold px-2 py-0.5 rounded-full"
-            style={{ backgroundColor: 'rgba(231,76,60,0.12)', color: '#E74C3C', border: '1px solid rgba(231,76,60,0.3)' }}>
-            🔴 {f}
+          <span key={f.label} className="text-[9px] font-bold px-2 py-0.5 rounded-full"
+            style={{
+              backgroundColor: f.verified ? 'rgba(231,76,60,0.12)'  : 'rgba(251,146,60,0.10)',
+              color:            f.verified ? '#E74C3C'               : '#FB923C',
+              border:           `1px solid ${f.verified ? 'rgba(231,76,60,0.35)' : 'rgba(251,146,60,0.35)'}`,
+            }}>
+            {f.label}{!f.verified ? ' (unverified)' : ''}
           </span>
         ))}
       </div>
@@ -211,7 +270,7 @@ function LookupResultCard({
           <p className="text-[11px] font-semibold" style={{ color: 'var(--c-primary)' }}>{result.owner_name}</p>
           {result.mailing_address && result.mailing_address !== result.property_address && (
             <p className="text-[10px] mt-0.5" style={{ color: 'var(--c-text-3)' }}>
-              ✉ {result.mailing_address}{result.owner_city ? `, ${result.owner_city}` : ''}{result.owner_state ? `, ${result.owner_state}` : ''}
+              {result.mailing_address}{result.owner_city ? `, ${result.owner_city}` : ''}{result.owner_state ? `, ${result.owner_state}` : ''}
             </p>
           )}
         </div>
@@ -220,8 +279,8 @@ function LookupResultCard({
       {/* Property stats grid */}
       <div className="grid grid-cols-4 gap-0" style={{ borderBottom: '1px solid var(--c-border)' }}>
         {[
-          { label: 'Beds',    value: result.beds   ?? '—' },
-          { label: 'Baths',   value: result.baths  ?? '—' },
+          { label: 'Beds',    value: result.beds      ?? '—' },
+          { label: 'Baths',   value: result.baths     ?? '—' },
           { label: 'Living',  value: fmtSqft(result.living_area) },
           { label: 'Built',   value: result.year_built ?? '—' },
         ].map(({ label, value }) => (
@@ -233,12 +292,12 @@ function LookupResultCard({
         ))}
       </div>
 
-      {/* Valuations */}
+      {/* Valuations — source tagged as PA */}
       <div className="grid grid-cols-3 gap-0" style={{ borderBottom: '1px solid var(--c-border)' }}>
         {[
-          { label: 'Market',   value: fmt$(result.market_value) },
+          { label: 'Market',   value: fmt$(result.market_value)   },
           { label: 'Assessed', value: fmt$(result.assessed_value) },
-          { label: 'Land',     value: fmt$(result.land_value) },
+          { label: 'Land',     value: fmt$(result.land_value)     },
         ].map(({ label, value }) => (
           <div key={label} className="flex flex-col items-center py-2.5 px-1"
             style={{ borderRight: '1px solid var(--c-border)' }}>
@@ -247,6 +306,54 @@ function LookupResultCard({
           </div>
         ))}
       </div>
+
+      {/* Enrichment section — equity + REAPI signals */}
+      {showEnrichSection && (
+        <div style={{ borderBottom: '1px solid var(--c-border)', backgroundColor: 'rgba(76,175,154,0.03)' }}>
+          <div className="flex items-center justify-between px-4 py-2">
+            <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: '#4CAF9A' }}>
+              REAPI Enrichment
+            </span>
+            <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold"
+              style={{ backgroundColor: 'rgba(107,159,212,0.12)', color: '#6B9FD4', border: '1px solid rgba(107,159,212,0.25)' }}>
+              REAPI
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-0 px-0" style={{ borderTop: '1px solid var(--c-border)' }}>
+            <div className="flex flex-col items-center py-2.5 px-1" style={{ borderRight: '1px solid var(--c-border)' }}>
+              <span className="text-[8px] font-bold uppercase tracking-widest mb-0.5" style={{ color: 'var(--c-text-3)' }}>Equity %</span>
+              <span className="text-[11px] font-bold" style={{ color: equityPct != null ? '#4CAF9A' : 'var(--c-text-3)' }}>
+                {equityPct != null ? `${equityPct}%` : '—'}
+              </span>
+            </div>
+            <div className="flex flex-col items-center py-2.5 px-1" style={{ borderRight: '1px solid var(--c-border)' }}>
+              <span className="text-[8px] font-bold uppercase tracking-widest mb-0.5" style={{ color: 'var(--c-text-3)' }}>Est. Equity</span>
+              <span className="text-[11px] font-bold" style={{ color: enrichData?.estimated_equity != null || rawR?._estimated_equity != null ? '#4CAF9A' : 'var(--c-text-3)' }}>
+                {fmt$(enrichData?.estimated_equity ?? (rawR?._estimated_equity as number | null))}
+              </span>
+            </div>
+            <div className="flex flex-col items-center py-2.5 px-1">
+              <span className="text-[8px] font-bold uppercase tracking-widest mb-0.5" style={{ color: 'var(--c-text-3)' }}>Est. Rent</span>
+              <span className="text-[11px] font-bold" style={{ color: rentEst != null ? '#C9A84C' : 'var(--c-text-3)' }}>
+                {rentEst != null ? `$${rentEst.toLocaleString()}` : '—'}
+              </span>
+            </div>
+          </div>
+          {reapiSignals.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 px-4 pb-2.5 pt-1">
+              {reapiSignals.map(s => (
+                <span key={s} className="text-[9px] font-bold px-2 py-0.5 rounded-full"
+                  style={{ backgroundColor: 'rgba(251,146,60,0.10)', color: '#FB923C', border: '1px solid rgba(251,146,60,0.3)' }}>
+                  REAPI: {s}
+                </span>
+              ))}
+              <span className="text-[9px] px-2 py-0.5" style={{ color: 'var(--c-text-3)', fontStyle: 'italic' }}>
+                Verify before labeling
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Last sale */}
       {(result.last_sale_date || result.last_sale_amount) && (
@@ -258,10 +365,12 @@ function LookupResultCard({
         </div>
       )}
 
-      {/* Distress detail */}
+      {/* Verified distress detail */}
       {d && (d.case_number || d.file_date || d.plaintiff || d.lender_name) && (
         <div className="px-4 py-2.5" style={{ borderBottom: '1px solid var(--c-border)', backgroundColor: 'rgba(231,76,60,0.04)' }}>
-          <p className="text-[9px] font-bold uppercase tracking-widest mb-1.5" style={{ color: '#E74C3C' }}>Distress Record</p>
+          <p className="text-[9px] font-bold uppercase tracking-widest mb-1.5" style={{ color: '#E74C3C' }}>
+            Verified Distress Record
+          </p>
           <div className="grid grid-cols-2 gap-x-3 gap-y-1">
             {d.case_number && (
               <div>
@@ -313,17 +422,33 @@ function LookupResultCard({
           }}>
           {saved ? '✓ Saved to Leads' : '＋ Save to Leads'}
         </button>
+
+        {/* Deep Enrich — PA-sourced only; REAPI results already have this data */}
+        {showEnrichBtn && (
+          <button onClick={onEnrich} disabled={enrichLoading}
+            className="py-2 px-3 text-[11px] font-bold rounded-xl flex items-center gap-1 hover:opacity-80 transition-all"
+            style={{ backgroundColor: 'rgba(76,175,154,0.12)', color: '#4CAF9A', border: '1px solid rgba(76,175,154,0.35)' }}>
+            {enrichLoading
+              ? <div className="w-3 h-3 border-2 border-t-transparent rounded-full animate-spin" style={{ borderColor: '#4CAF9A', borderTopColor: 'transparent' }} />
+              : '⚡ Enrich'}
+          </button>
+        )}
+
         {result.pa_url && (
           <a href={result.pa_url} target="_blank" rel="noopener noreferrer"
             className="py-2 px-3 text-[11px] font-bold rounded-xl flex items-center gap-1 hover:opacity-80 transition-all"
             style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
-            🏛 PA
+            PA
           </a>
         )}
         <a href={gmaps} target="_blank" rel="noopener noreferrer"
           className="py-2 px-3 text-[11px] font-bold rounded-xl flex items-center gap-1 hover:opacity-80 transition-all"
           style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
-          📍 Map
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
+          </svg>
+          Map
         </a>
       </div>
     </div>
@@ -390,12 +515,16 @@ export default function PropertySearchClient() {
   const [lookupCompsLoading, setLookupCompsLoading] = useState(false)
   const [lookupCompsError,   setLookupCompsError]   = useState<string | null>(null)
 
+  // Deep Enrich — explicit REAPI pull for PAO-sourced properties
+  const [enrichData,    setEnrichData]    = useState<EnrichmentData | null>(null)
+  const [enrichLoading, setEnrichLoading] = useState(false)
+
   // Saved searches
   const [savedSearches, setSavedSearches]   = useState<SavedSearch[]>([])
   const [activeSaved, setActiveSaved]       = useState<string | null>(null)
   const [showSaveModal, setShowSaveModal]   = useState(false)
   const [saveName, setSaveName]             = useState('')
-  const [saveEmoji, setSaveEmoji]           = useState('🔍')
+  const [saveEmoji, setSaveEmoji]           = useState('')
 
   // Load saved searches on mount
   useEffect(() => {
@@ -483,6 +612,7 @@ export default function PropertySearchClient() {
     setLookupSaved(false)
     setLookupComps(null)
     setLookupCompsError(null)
+    setEnrichData(null)
     try {
       const res  = await fetch(`/api/property-search?q=${encodeURIComponent(q)}`)
       const data = await res.json()
@@ -516,7 +646,11 @@ export default function PropertySearchClient() {
 
   const saveLookupToLeads = useCallback(async () => {
     if (!lookupResult) return
-    // Map PropertySearchResult → the shape /api/properties/save expects
+    // Map PropertySearchResult → the shape /api/properties/save expects.
+    // Lead type (is_pre_foreclosure etc.) is intentionally NOT set here —
+    // the user assigns lead type manually after reviewing the property.
+    // Distress details are saved only if a verified case number is present.
+    const hasVerifiedDistress = !!(lookupResult.distress?.case_number)
     const property = {
       county:           lookupResult.county,
       property_address: lookupResult.property_address,
@@ -539,15 +673,17 @@ export default function PropertySearchClient() {
       land_value:       lookupResult.land_value,
       data_source:      lookupResult.source_display ?? lookupResult.source,
       source:           lookupResult.source_type === 'public' ? 'county_pa' : 'reapi',
-      case_number:      lookupResult.distress?.case_number ?? null,
-      file_date:        lookupResult.distress?.file_date ?? null,
-      plaintiff:        lookupResult.distress?.plaintiff ?? null,
-      lender_name:      lookupResult.distress?.lender_name ?? null,
-      is_pre_foreclosure: lookupResult.distress?.foreclosure_type === 'P',
-      is_foreclosure:     lookupResult.distress?.foreclosure_type === 'F',
-      is_auction:         lookupResult.distress?.foreclosure_type === 'A',
-      equity_percentage:  null,
-      equity_tier:        null,
+      // Distress fields only if verified (case number present)
+      case_number:      hasVerifiedDistress ? lookupResult.distress!.case_number : null,
+      file_date:        hasVerifiedDistress ? lookupResult.distress!.file_date   : null,
+      plaintiff:        hasVerifiedDistress ? lookupResult.distress!.plaintiff   : null,
+      lender_name:      hasVerifiedDistress ? lookupResult.distress!.lender_name : null,
+      // Lead type NOT auto-assigned from lookup — user assigns manually
+      is_pre_foreclosure: false,
+      is_foreclosure:     false,
+      is_auction:         false,
+      equity_percentage:  enrichData?.equity_percent  ?? null,
+      equity_tier:        enrichData?.high_equity ? 'High' : enrichData?.equity_percent != null ? (enrichData.equity_percent >= 50 ? 'Medium' : 'Low') : null,
       folio_number_raw:   lookupResult.folio,
     }
     const res = await fetch('/api/properties/save', {
@@ -556,6 +692,25 @@ export default function PropertySearchClient() {
       body: JSON.stringify({ property }),
     })
     if (res.ok) setLookupSaved(true)
+  }, [lookupResult, enrichData])
+
+  const runEnrich = useCallback(async () => {
+    if (!lookupResult) return
+    setEnrichLoading(true)
+    try {
+      const res = await fetch('/api/property-search/enrich', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          address: [lookupResult.property_address, lookupResult.city, lookupResult.state, lookupResult.zip].filter(Boolean).join(', '),
+          folio:   lookupResult.folio,
+          county:  lookupResult.county,
+        }),
+      })
+      const data = await res.json()
+      if (data.enrichment) setEnrichData(data.enrichment as EnrichmentData)
+    } catch { /* silently ignore network errors */ }
+    finally { setEnrichLoading(false) }
   }, [lookupResult])
 
   const hasAnyCriteria = activeCount > 0 || searchInput.trim().length > 0 || drawnZone !== null
@@ -587,7 +742,15 @@ export default function PropertySearchClient() {
                   backgroundColor: mode === m ? 'var(--c-primary)' : 'transparent',
                   color: mode === m ? '#C9A84C' : 'var(--c-text-3)',
                 }}>
-                {m === 'search' ? '🔍' : '✏️'}
+                {m === 'search' ? (
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11A6 6 0 105 11a6 6 0 0012 0z"/>
+                  </svg>
+                ) : (
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/>
+                  </svg>
+                )}
                 {m === 'search' ? 'Search Mode' : 'Draw Zone'}
               </button>
             ))}
@@ -650,7 +813,7 @@ export default function PropertySearchClient() {
                 </span>
                 <button onClick={() => setDrawnZone(null)}
                   className="text-[10px] hover:opacity-60" style={{ color: '#C9A84C' }}>
-                  ✕ Remove
+                  Remove
                 </button>
               </div>
             )}
@@ -714,7 +877,11 @@ export default function PropertySearchClient() {
                   onClear={() => {
                     setLookupResult(null); setLookupError(null); setLookupSaved(false)
                     setLookupComps(null); setLookupCompsError(null)
+                    setEnrichData(null)
                   }}
+                  enrichData={enrichData}
+                  enrichLoading={enrichLoading}
+                  onEnrich={runEnrich}
                 />
               ) : null}
             </div>
@@ -783,7 +950,7 @@ export default function PropertySearchClient() {
                         color: activeSaved === s.id ? '#C9A84C' : 'var(--c-text-2)',
                         border: `1px solid ${activeSaved === s.id ? 'var(--c-primary)' : 'var(--c-border)'}`,
                       }}>
-                      <span>{s.emoji}</span> {s.name}
+                      {s.name}
                     </button>
                     <button onClick={() => deleteSaved(s.id)}
                       className="text-[10px] px-1 hover:opacity-60" style={{ color: 'var(--c-text-3)' }}>×</button>
@@ -888,15 +1055,6 @@ export default function PropertySearchClient() {
           <div className="rounded-2xl p-6 w-80 shadow-2xl"
             style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
             <h3 className="text-base font-bold mb-4" style={{ color: 'var(--c-primary)' }}>Save Search Spec</h3>
-            <div className="flex gap-2 mb-3">
-              {['🔍','⚡','💰','🏠','🎯','📍','⭐','🏛️'].map(e => (
-                <button key={e} onClick={() => setSaveEmoji(e)}
-                  className="w-8 h-8 rounded-lg text-base flex items-center justify-center transition-all"
-                  style={{ backgroundColor: saveEmoji === e ? 'rgba(201,168,76,0.2)' : 'var(--c-hover)', border: `1px solid ${saveEmoji === e ? '#C9A84C' : 'var(--c-border)'}` }}>
-                  {e}
-                </button>
-              ))}
-            </div>
             <input
               autoFocus
               value={saveName}

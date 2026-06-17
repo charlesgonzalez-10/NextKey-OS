@@ -3,14 +3,23 @@
 import { useState, useEffect } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
+import dynamic from 'next/dynamic'
+
+const EmailComposer = dynamic(() => import('@/components/EmailComposer'), { ssr: false })
+const DocumentsTab  = dynamic(() => import('@/components/DocumentsTab'),  { ssr: false })
 
 const STATUSES = ['Lead', 'Analyzing', 'Offer Sent', 'Under Contract', 'Closed', 'Dead']
 type AnalyzerTab = 'wholesale' | 'flip' | 'ltr' | 'str' | 'mf'
+
+interface PipelineStage { id: string; name: string; position: number }
+interface Pipeline { id: string; name: string; pipeline_stages: PipelineStage[] }
 
 interface Deal {
   id: string
   address: string
   status: string
+  pipeline_id: string | null
+  pipeline_stage_id: string | null
   arv: number
   repair_cost: number
   closing_cost: number
@@ -147,7 +156,7 @@ function FlipTab({ dealId, arv: initialArv, repairs: initialRepairs }: { dealId:
           {lowProfit && (
             <div className="rounded-xl px-4 py-3 text-sm font-semibold"
               style={{ backgroundColor: 'rgba(224,123,106,0.1)', border: '1px solid rgba(224,123,106,0.3)', color: '#E07B6A' }}>
-              ⚠️ Projected profit is under $30k — review numbers before proceeding.
+              Projected profit is under $30k — review numbers before proceeding.
             </div>
           )}
           <div className="grid grid-cols-2 gap-3">
@@ -586,13 +595,22 @@ export default function DealDetailClient({
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState(false)
   const [error, setError] = useState('')
   const [analyzerTab, setAnalyzerTab] = useState<AnalyzerTab>('wholesale')
+  const [showEmailComposer, setShowEmailComposer] = useState(false)
+  const [pipelines, setPipelines] = useState<Pipeline[]>([])
+
+  useEffect(() => {
+    fetch('/api/pipelines').then(r => r.ok ? r.json() : []).then(setPipelines)
+  }, [])
 
   const [form, setForm] = useState({
     address: deal.address || '',
     contact_id: deal.contact_id || '',
     status: deal.status || 'Lead',
+    pipeline_id: deal.pipeline_id || '',
+    pipeline_stage_id: deal.pipeline_stage_id || '',
     arv: deal.arv?.toString() || '',
     repair_cost: deal.repair_cost?.toString() || '',
     closing_cost: deal.closing_cost?.toString() || '',
@@ -603,8 +621,15 @@ export default function DealDetailClient({
   })
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
-    setForm(prev => ({ ...prev, [e.target.name]: e.target.value }))
+    const { name, value } = e.target
+    setForm(prev => ({
+      ...prev,
+      [name]: value,
+      ...(name === 'pipeline_id' ? { pipeline_stage_id: '' } : {}),
+    }))
   }
+
+  const selectedPipelineStages = pipelines.find(p => p.id === form.pipeline_id)?.pipeline_stages ?? []
 
   // Wholesale calculations
   const arv      = parseFloat(form.arv) || 0
@@ -624,6 +649,8 @@ export default function DealDetailClient({
         address: form.address,
         contact_id: form.contact_id || null,
         status: form.status,
+        pipeline_id: form.pipeline_id || null,
+        pipeline_stage_id: form.pipeline_stage_id || null,
         arv: parseFloat(form.arv) || null,
         repair_cost: parseFloat(form.repair_cost) || null,
         closing_cost: parseFloat(form.closing_cost) || null,
@@ -640,10 +667,10 @@ export default function DealDetailClient({
   }
 
   const handleDelete = async () => {
-    if (!confirm('Delete this deal? This cannot be undone.')) return
     setDeleting(true)
-    await supabase.from('deals').delete().eq('id', deal.id)
-    router.push('/deals')
+    const { error: delErr } = await supabase.from('deals').delete().eq('id', deal.id)
+    if (delErr) { setError('Failed to delete deal. Please try again.'); setDeleting(false); setDeleteConfirm(false) }
+    else router.push('/deals')
   }
 
   const TABS: { key: AnalyzerTab; label: string }[] = [
@@ -680,11 +707,26 @@ export default function DealDetailClient({
                 className="font-bold px-4 py-2 rounded-xl hover:opacity-90 transition-opacity text-sm">
                 Edit
               </button>
-              <button onClick={handleDelete} disabled={deleting}
-                className="px-4 py-2 rounded-xl text-sm font-medium transition-colors"
-                style={{ border: '1px solid rgba(224,123,106,0.4)', color: '#E07B6A' }}>
-                {deleting ? '...' : 'Del'}
-              </button>
+              {deleteConfirm ? (
+                <span className="flex items-center gap-1.5">
+                  <button onClick={handleDelete} disabled={deleting}
+                    className="px-3 py-2 rounded-xl text-sm font-semibold transition-colors"
+                    style={{ backgroundColor: '#E07B6A', color: '#fff' }}>
+                    {deleting ? '…' : 'Confirm'}
+                  </button>
+                  <button onClick={() => setDeleteConfirm(false)}
+                    className="px-3 py-2 rounded-xl text-sm transition-colors"
+                    style={{ border: '1px solid var(--c-border)', color: 'var(--c-text-2)' }}>
+                    Cancel
+                  </button>
+                </span>
+              ) : (
+                <button onClick={() => setDeleteConfirm(true)}
+                  className="px-4 py-2 rounded-xl text-sm font-medium transition-colors"
+                  style={{ border: '1px solid rgba(224,123,106,0.4)', color: '#E07B6A' }}>
+                  Delete
+                </button>
+              )}
             </>
           ) : (
             <>
@@ -696,7 +738,7 @@ export default function DealDetailClient({
               <button onClick={() => { setEditing(false); setError('') }}
                 className="px-4 py-2 rounded-xl text-sm font-medium transition-colors"
                 style={{ border: '1px solid var(--c-border)', color: 'var(--c-text-2)' }}>
-                ✕
+                Cancel
               </button>
             </>
           )}
@@ -737,6 +779,28 @@ export default function DealDetailClient({
                     {STATUSES.map(s => <option key={s}>{s}</option>)}
                   </select>
                 </div>
+                {pipelines.length > 0 && (
+                  <div>
+                    <label className="block text-xs font-semibold mb-1" style={{ color: 'var(--c-text-2)' }}>Pipeline</label>
+                    <select name="pipeline_id" value={form.pipeline_id} onChange={handleChange}
+                      className="w-full rounded-xl px-3 py-2.5 text-sm focus:outline-none"
+                      style={{ border: '1px solid var(--c-border)', backgroundColor: 'var(--c-input-bg)', color: 'var(--c-primary)' }}>
+                      <option value="">— None —</option>
+                      {pipelines.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                  </div>
+                )}
+                {selectedPipelineStages.length > 0 && (
+                  <div>
+                    <label className="block text-xs font-semibold mb-1" style={{ color: 'var(--c-text-2)' }}>Stage</label>
+                    <select name="pipeline_stage_id" value={form.pipeline_stage_id} onChange={handleChange}
+                      className="w-full rounded-xl px-3 py-2.5 text-sm focus:outline-none"
+                      style={{ border: '1px solid var(--c-border)', backgroundColor: 'var(--c-input-bg)', color: 'var(--c-primary)' }}>
+                      <option value="">— None —</option>
+                      {selectedPipelineStages.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  </div>
+                )}
                 <div>
                   <label className="block text-xs font-semibold mb-1" style={{ color: 'var(--c-text-2)' }}>Source</label>
                   <input name="source" value={form.source} onChange={handleChange}
@@ -750,12 +814,42 @@ export default function DealDetailClient({
                   <span className="text-xs w-32 pt-0.5" style={{ color: 'var(--c-text-2)' }}>Status</span>
                   <span className="text-sm font-semibold" style={{ color: 'var(--c-primary)' }}>{deal.status}</span>
                 </div>
+                {deal.pipeline_id && pipelines.length > 0 && (() => {
+                  const p = pipelines.find(p => p.id === deal.pipeline_id)
+                  const s = p?.pipeline_stages.find(s => s.id === deal.pipeline_stage_id)
+                  return p ? (
+                    <div className="flex gap-2">
+                      <span className="text-xs w-32 pt-0.5" style={{ color: 'var(--c-text-2)' }}>Pipeline</span>
+                      <span className="text-sm font-semibold" style={{ color: 'var(--c-primary)' }}>
+                        {p.name}{s ? ` · ${s.name}` : ''}
+                      </span>
+                    </div>
+                  ) : null
+                })()}
                 {deal.contacts && (
                   <div className="flex gap-2">
                     <span className="text-xs w-32 pt-0.5" style={{ color: 'var(--c-text-2)' }}>Contact</span>
-                    <a href={`/contacts/${deal.contacts.id}`} className="text-sm font-medium hover:underline" style={{ color: 'var(--c-primary)' }}>
-                      {deal.contacts.name}
-                    </a>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <a href={`/contacts/${deal.contacts.id}`} className="text-sm font-medium hover:underline" style={{ color: 'var(--c-primary)' }}>
+                        {deal.contacts.name}
+                      </a>
+                      {deal.contacts.email && (
+                        <button
+                          onClick={() => setShowEmailComposer(true)}
+                          style={{
+                            padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                            backgroundColor: 'rgba(201,168,76,0.12)', color: '#C9A84C',
+                            border: '1px solid rgba(201,168,76,0.25)', cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', gap: 5,
+                          }}
+                        >
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+                          </svg>
+                          Email
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )}
                 {deal.source && (
@@ -909,7 +1003,9 @@ export default function DealDetailClient({
                     style={{ backgroundColor: 'var(--c-card-alt)' }}
                     onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--c-hover)')}
                     onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'var(--c-card-alt)')}>
-                    <span className="text-sm">📞</span>
+                    <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--c-primary)' }}>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 7V5z"/>
+                    </svg>
                     <span className="text-sm" style={{ color: 'var(--c-primary)' }}>{deal.contacts.phone}</span>
                   </a>
                 )}
@@ -919,7 +1015,9 @@ export default function DealDetailClient({
                     style={{ backgroundColor: 'var(--c-card-alt)' }}
                     onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--c-hover)')}
                     onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'var(--c-card-alt)')}>
-                    <span className="text-sm">✉️</span>
+                    <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--c-primary)' }}>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+                    </svg>
                     <span className="text-sm truncate" style={{ color: 'var(--c-primary)' }}>{deal.contacts.email}</span>
                   </a>
                 )}
@@ -936,7 +1034,10 @@ export default function DealDetailClient({
               style={{ backgroundColor: 'var(--c-card-alt)' }}
               onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--c-hover)')}
               onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'var(--c-card-alt)')}>
-              <span className="text-sm">📍</span>
+              <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--c-primary)' }}>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
+              </svg>
               <span className="text-xs leading-tight" style={{ color: 'var(--c-primary)' }}>{deal.address}</span>
             </a>
             <a
@@ -946,12 +1047,31 @@ export default function DealDetailClient({
               style={{ backgroundColor: 'var(--c-card-alt)' }}
               onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--c-hover)')}
               onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'var(--c-card-alt)')}>
-              <span className="text-sm">🏠</span>
+              <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--c-primary)' }}>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+                <polyline points="9,22 9,12 15,12 15,22" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}/>
+              </svg>
               <span className="text-sm" style={{ color: 'var(--c-primary)' }}>View on Zillow</span>
             </a>
           </div>
         </div>
       </div>
+
+      {/* ── Documents ── */}
+      <div className="rounded-2xl overflow-hidden" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+        <DocumentsTab dealId={deal.id} />
+      </div>
+
+      {showEmailComposer && deal.contacts?.email && (
+        <EmailComposer
+          defaultTo={deal.contacts.email}
+          contactId={deal.contacts.id}
+          dealId={deal.id}
+          contactName={deal.contacts.name}
+          defaultSubject={`Regarding ${deal.address}`}
+          onClose={() => setShowEmailComposer(false)}
+        />
+      )}
     </div>
   )
 }

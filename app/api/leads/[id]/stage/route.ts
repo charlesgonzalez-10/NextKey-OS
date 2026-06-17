@@ -15,7 +15,7 @@ export const dynamic = 'force-dynamic'
 
 const service = serviceClient
 
-const VALID_STAGES = ['reviewing', 'contacted', 'offer', 'dead', null]
+const VALID_STAGES = ['reviewing', 'contacted', 'offer', 'dead', 'blocked', null]
 
 export async function PATCH(
   req: NextRequest,
@@ -41,8 +41,19 @@ export async function PATCH(
     }
   }
 
-  if ('starred' in body)     update.starred     = Boolean(body.starred)
-  if ('lead_score' in body)  update.lead_score  = body.lead_score
+  if ('starred'       in body) update.starred       = Boolean(body.starred)
+  if ('lead_score'    in body) update.lead_score    = body.lead_score
+  if ('lead_type_id'  in body) update.lead_type_id  = body.lead_type_id  ?? null
+  if ('vertical_id'   in body) update.vertical_id   = body.vertical_id   ?? null
+  if ('lead_source'   in body) update.lead_source   = body.lead_source   ?? null
+  // Action tracking fields
+  if ('call_status'   in body) update.call_status   = body.call_status   ?? null
+  if ('sms_status'    in body) update.sms_status    = body.sms_status    ?? null
+  if ('email_status'  in body) update.email_status  = body.email_status  ?? null
+  if ('offer_sent'    in body) update.offer_sent    = Boolean(body.offer_sent)
+  if ('offer_pct'     in body) update.offer_pct     = body.offer_pct     ?? null
+  if ('offer_amount'  in body) update.offer_amount  = body.offer_amount  ?? null
+  if ('blocked'       in body) update.blocked       = Boolean(body.blocked)
 
   if (Object.keys(update).length <= 1) {  // only updated_at
     return NextResponse.json({ error: 'No valid fields to update' }, { status: 400 })

@@ -17,6 +17,7 @@ import { createClient } from '@/lib/supabase/server'
 import { parsePropStreamCSV } from '@/lib/scrapers/propstream-csv'
 import { detectEntityType, calcEquity, isDuplicate } from '@/lib/scrapers/utils'
 import type { County } from '@/lib/scrapers/types'
+import { getUserProfile, canAccessAdmin } from '@/lib/rbac'
 
 export const dynamic    = 'force-dynamic'
 export const maxDuration = 120  // 2 min — no PA lookups, so 120s is plenty
@@ -25,6 +26,8 @@ export async function POST(request: NextRequest) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const profile = await getUserProfile(user.id)
+  if (!canAccessAdmin(profile, user.email)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
   let formData: FormData
   try {

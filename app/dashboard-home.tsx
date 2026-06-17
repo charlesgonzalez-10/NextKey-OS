@@ -15,9 +15,21 @@ export default function DashboardHome({ contactCount, dealCount }: Props) {
   ]
 
   const quickActions = [
-    { label: 'Add Contact', href: '/contacts/new', icon: '👤' },
-    { label: 'New Deal', href: '/deals/new', icon: '📋' },
-    { label: 'View Pipeline', href: '/pipeline', icon: '📊' },
+    { label: 'Add Contact', href: '/contacts/new', icon: (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
+      </svg>
+    )},
+    { label: 'New Deal', href: '/deals/new', icon: (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4"/>
+      </svg>
+    )},
+    { label: 'View Pipeline', href: '/pipeline', icon: (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"/>
+      </svg>
+    )},
   ]
 
   return (

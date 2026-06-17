@@ -108,7 +108,7 @@ function buildChips(params: URLSearchParams): { key: string; label: string }[] {
   if (params.get('out_of_state') === 'true') add('out_of_state','Out-of-State Owner')
   if (params.get('free_clear') === 'true')   add('free_clear',  'Free & Clear')
   if (params.get('has_phone') === 'true')    add('has_phone',   'Has Phone')
-  if (params.get('zone'))                    add('zone',        '📍 Zone Filter Active')
+  if (params.get('zone'))                    add('zone',        'Zone Filter Active')
   return chips
 }
 
@@ -271,7 +271,12 @@ function DrawerComps({ lead }: { lead: Lead }) {
   if (noKey) {
     return (
       <div className="rounded-xl p-5 text-center" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-        <p className="text-2xl mb-2">🔑</p>
+        <div className="w-10 h-10 rounded-full flex items-center justify-center mx-auto mb-2"
+          style={{ backgroundColor: 'var(--c-hover)' }}>
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--c-text-3)' }}>
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+          </svg>
+        </div>
         <p className="text-sm font-bold mb-1" style={{ color: 'var(--c-primary)' }}>Beaches MLS Not Connected</p>
         <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>
           Add <code className="px-1 rounded" style={{ backgroundColor: 'var(--c-hover)' }}>RENTCAST_API_KEY</code> to Vercel environment variables to enable live comps.
@@ -768,7 +773,11 @@ function ResultRow({
       {/* Phone */}
       <td className="py-3 pr-4 text-center">
         {lead.phone_1
-          ? <span className="text-[10px] font-bold" style={{ color: '#4CAF9A' }}>📞</span>
+          ? <span className="flex items-center justify-center" style={{ color: '#4CAF9A' }}>
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 7V5z"/>
+              </svg>
+            </span>
           : <span className="text-[10px]" style={{ color: 'var(--c-text-3)' }}>—</span>}
       </td>
 
@@ -870,7 +879,6 @@ export default function SearchResultsClient() {
   }, [rawParams, sortBy, sortDir])
 
   useEffect(() => { fetchResults(1) }, [sortBy, sortDir]) // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { fetchResults(1) }, [])                // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Actions ──────────────────────────────────────────────────────────────
 
@@ -985,7 +993,9 @@ export default function SearchResultsClient() {
       {dbFallback && !loading && (
         <div className="px-5 py-2.5 flex items-start gap-3"
           style={{ backgroundColor: 'rgba(201,168,76,0.08)', borderBottom: '1px solid rgba(201,168,76,0.25)' }}>
-          <span className="text-sm shrink-0 mt-0.5">⚠️</span>
+          <svg className="w-4 h-4 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: '#C9A84C' }}>
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.962-.833-2.732 0L4.072 16.5c-.77.833.192 2.5 1.732 2.5z"/>
+          </svg>
           <div className="flex-1 min-w-0">
             <p className="text-[11px] font-bold" style={{ color: '#C9A84C' }}>Live Search Unavailable</p>
             <p className="text-[10px] mt-0.5" style={{ color: 'var(--c-text-3)' }}>{dbFallback}</p>
@@ -1067,7 +1077,12 @@ export default function SearchResultsClient() {
         ) : error ? (
           <div className="flex items-center justify-center py-24">
             <div className="text-center max-w-md px-6">
-              <p className="text-4xl mb-4">⚠️</p>
+              <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
+                style={{ backgroundColor: 'rgba(239,68,68,0.1)' }}>
+                <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: '#ef4444' }}>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.962-.833-2.732 0L4.072 16.5c-.77.833.192 2.5 1.732 2.5z"/>
+                </svg>
+              </div>
               <p className="text-sm font-bold mb-2" style={{ color: 'var(--c-primary)' }}>Search Error</p>
               <p className="text-xs font-mono p-3 rounded-xl mb-4"
                 style={{ backgroundColor: 'rgba(239,68,68,0.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.2)' }}>
@@ -1088,7 +1103,12 @@ export default function SearchResultsClient() {
         ) : leads.length === 0 ? (
           <div className="flex items-center justify-center py-24">
             <div className="text-center">
-              <p className="text-5xl mb-4">🔍</p>
+              <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
+                style={{ backgroundColor: 'var(--c-hover)' }}>
+                <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--c-text-3)' }}>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-4.35-4.35M17 11A6 6 0 105 11a6 6 0 0012 0z"/>
+                </svg>
+              </div>
               <p className="text-sm font-bold" style={{ color: 'var(--c-primary)' }}>No properties match your criteria</p>
               <p className="text-xs mt-1 mb-5" style={{ color: 'var(--c-text-3)' }}>Try broadening your search or removing some filters</p>
               <button onClick={() => router.push('/property-search')}

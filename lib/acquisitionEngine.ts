@@ -126,16 +126,24 @@ export interface WorkspaceNote {
 }
 
 export interface WorkspaceDocument {
-  id: string
-  name: string
-  category?: string | null
-  status: string
-  offer_amount?: number | null
-  pdf_path?: string | null
-  signed_pdf_path?: string | null
-  created_at: string
-  updated_at?: string
-  recipient_name?: string | null
+  id:                  string
+  name:                string
+  category?:           string | null
+  status:              string
+  document_type?:      string | null
+  offer_amount?:       number | null
+  pdf_path?:           string | null
+  signed_pdf_path?:    string | null
+  file_path?:          string | null
+  file_type?:          string | null
+  signing_session_id?: string | null
+  version?:            number
+  is_executed?:        boolean
+  executed_at?:        string | null
+  sent_at?:            string | null
+  recipient_name?:     string | null
+  created_at:          string
+  updated_at?:         string
 }
 
 export interface WorkspaceContact {

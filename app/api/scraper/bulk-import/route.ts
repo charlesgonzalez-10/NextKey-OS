@@ -18,6 +18,7 @@ import { createClient } from '@/lib/supabase/server'
 import { parsePalmBeachBulkFile } from '@/lib/scrapers/palm-beach-bulk'
 import { fetchPropertyData } from '@/lib/scrapers/property-appraiser'
 import { detectEntityType, calcEquity, isDuplicate } from '@/lib/scrapers/utils'
+import { getUserProfile, canAccessAdmin } from '@/lib/rbac'
 import type { EnrichedLead } from '@/lib/scrapers/types'
 
 export const dynamic = 'force-dynamic'
@@ -27,6 +28,8 @@ export async function POST(request: NextRequest) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const profile = await getUserProfile(user.id)
+  if (!canAccessAdmin(profile, user.email)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
   // ── Parse multipart upload ────────────────────────────────────────────────
   let formData: FormData
