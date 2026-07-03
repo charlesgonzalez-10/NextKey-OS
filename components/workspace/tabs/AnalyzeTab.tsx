@@ -6,7 +6,8 @@ import { useWorkspace } from '@/app/leads/[id]/workspace-client'
 import { fmtMoneyFull, fmtDateShort, type WorkspaceAISummary } from '@/lib/acquisitionEngine'
 import type { PropertyComp } from '@/lib/enrichment/types'
 
-const CompsMap = dynamic(() => import('@/components/CompsMap'), { ssr: false })
+const CompsMap           = dynamic(() => import('@/components/CompsMap'), { ssr: false })
+const DataPassportPanel  = dynamic(() => import('@/components/workspace/tabs/DataPassportPanel'), { ssr: false })
 
 // ─── Shared primitives ────────────────────────────────────────────────────────
 
@@ -81,6 +82,229 @@ const EQUITY_COLORS: Record<string, string> = {
 
 const COUNTY_LABELS: Record<string, string> = {
   'miami-dade': 'Miami-Dade', 'broward': 'Broward', 'palm-beach': 'Palm Beach',
+}
+
+// ─── Foreclosure status constants ────────────────────────────────────────────
+
+const FC_STATUSES = [
+  'Active', 'Pending', 'Dismissed', 'Cancelled', 'Reinstated',
+  'Sold at Auction', 'Certificate Issued', 'Final Judgment',
+  'Bankruptcy Stay', 'Unknown',
+] as const
+
+const FC_STATUS_COLORS: Record<string, string> = {
+  'Active':             '#ef4444',
+  'Pending':            '#f97316',
+  'Dismissed':          '#22c55e',
+  'Cancelled':          '#6b7280',
+  'Reinstated':         '#3b82f6',
+  'Sold at Auction':    '#a855f7',
+  'Certificate Issued': '#f59e0b',
+  'Final Judgment':     '#dc2626',
+  'Bankruptcy Stay':    '#7c3aed',
+  'Unknown':            '#94a3b8',
+}
+
+function deriveREAPIForeclosureStatus(lead: { is_foreclosure?: boolean | null; is_pre_foreclosure?: boolean | null }): string | null {
+  if (lead.is_foreclosure)     return 'Active'
+  if (lead.is_pre_foreclosure) return 'Pending'
+  return null
+}
+
+// ─── Foreclosure Status Editor ────────────────────────────────────────────────
+
+function ForeclosureStatusEditor() {
+  const { lead, patchLeadLocal } = useWorkspace()
+  const propertyId = lead.property_id ?? lead.id
+
+  const [editing,  setEditing]  = useState(false)
+  const [pending,  setPending]  = useState<string | null>(null)
+  const [notes,    setNotes]    = useState('')
+  const [saving,   setSaving]   = useState(false)
+  const [toast,    setToast]    = useState<string | null>(null)
+
+  const override       = lead.foreclosure_status_override ?? null
+  const reapiStatus    = deriveREAPIForeclosureStatus(lead)
+  const effectiveStatus = override ?? reapiStatus
+  const source          = override ? 'Manual' : (reapiStatus ? 'REAPI' : null)
+  const reapiChanged    = lead.foreclosure_reapi_changed === true
+  const statusColor     = effectiveStatus ? (FC_STATUS_COLORS[effectiveStatus] ?? '#94a3b8') : '#6b7280'
+
+  async function handleSave() {
+    if (!pending) return
+    setSaving(true)
+    try {
+      const res = await fetch(`/api/properties/${propertyId}/foreclosure-status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: pending, notes: notes.trim() || undefined }),
+      })
+      if (res.ok) {
+        patchLeadLocal({
+          foreclosure_status_override: pending,
+          foreclosure_status_source:   'Manual',
+          foreclosure_reapi_changed:   false,
+        })
+        setToast('Status updated')
+        setEditing(false)
+        setNotes('')
+        setTimeout(() => setToast(null), 3000)
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleReset() {
+    setSaving(true)
+    try {
+      const res = await fetch(`/api/properties/${propertyId}/foreclosure-status`, { method: 'DELETE' })
+      if (res.ok) {
+        patchLeadLocal({
+          foreclosure_status_override: null,
+          foreclosure_status_source:   'REAPI',
+          foreclosure_reapi_changed:   false,
+        })
+        setToast('Reset to REAPI')
+        setTimeout(() => setToast(null), 3000)
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Card style={{ marginBottom: 10, position: 'relative' }}>
+      <CardTitle>Foreclosure Status</CardTitle>
+
+      {reapiChanged && (
+        <div style={{
+          fontSize: 10, color: '#C9A84C',
+          background: 'rgba(201,168,76,0.10)', border: '1px solid rgba(201,168,76,0.25)',
+          borderRadius: 5, padding: '5px 8px', marginBottom: 8,
+          display: 'flex', alignItems: 'center', gap: 5,
+        }}>
+          ⚠ REAPI data updated — compare with your manual override
+        </div>
+      )}
+
+      {toast && (
+        <span style={{ position: 'absolute', top: 12, right: 14, fontSize: 10, color: '#4CAF9A', fontWeight: 700 }}>
+          ✓ {toast}
+        </span>
+      )}
+
+      {!editing ? (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {effectiveStatus ? (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5,
+                background: statusColor + '22', border: `1px solid ${statusColor}55`,
+                borderRadius: 5, padding: '3px 9px',
+                fontSize: 12, fontWeight: 700, color: statusColor,
+              }}>
+                <span style={{ width: 7, height: 7, borderRadius: '50%', background: statusColor, flexShrink: 0 }} />
+                {effectiveStatus}
+              </span>
+            ) : (
+              <span style={{ fontSize: 12, color: '#6b7280', fontStyle: 'italic' }}>No status set</span>
+            )}
+            {source && (
+              <span style={{ fontSize: 10, color: '#4a6a9a', background: 'rgba(255,255,255,0.05)', borderRadius: 4, padding: '2px 6px' }}>
+                {source}
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {override && (
+              <button
+                onClick={handleReset}
+                disabled={saving}
+                style={{ fontSize: 10, color: '#4a6a9a', background: 'none', border: 'none', cursor: saving ? 'not-allowed' : 'pointer', padding: 0 }}
+              >
+                {saving ? '...' : '↺ Reset to REAPI'}
+              </button>
+            )}
+            <button
+              onClick={() => { setPending(effectiveStatus ?? 'Active'); setEditing(true) }}
+              style={{
+                fontSize: 11, fontWeight: 600, color: '#0A1F44',
+                background: '#C9A84C', border: 'none', borderRadius: 4,
+                padding: '3px 10px', cursor: 'pointer',
+              }}
+            >
+              Edit
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 4, marginBottom: 8 }}>
+            {FC_STATUSES.map(s => {
+              const c = FC_STATUS_COLORS[s]
+              const sel = pending === s
+              return (
+                <button
+                  key={s}
+                  onClick={() => setPending(s)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    padding: '6px 8px', borderRadius: 5, cursor: 'pointer',
+                    background: sel ? c + '22' : 'rgba(255,255,255,0.03)',
+                    border: `1px solid ${sel ? c + '66' : '#1a3050'}`,
+                    color: sel ? c : '#94a3b8',
+                    fontSize: 11, fontWeight: sel ? 700 : 400,
+                    textAlign: 'left' as const,
+                  }}
+                >
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: c, flexShrink: 0 }} />
+                  {s}
+                </button>
+              )
+            })}
+          </div>
+
+          <textarea
+            placeholder="Optional notes (e.g., Case dismissed per court records)"
+            value={notes}
+            onChange={e => setNotes(e.target.value)}
+            rows={2}
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              background: 'rgba(255,255,255,0.04)', border: '1px solid #1a3050',
+              borderRadius: 5, color: '#e2e8f0', fontSize: 11, padding: '6px 8px',
+              resize: 'none', fontFamily: 'inherit', marginBottom: 6,
+            }}
+          />
+
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              onClick={handleSave}
+              disabled={saving || !pending}
+              style={{
+                flex: 1, padding: '7px 0', borderRadius: 5, cursor: saving || !pending ? 'not-allowed' : 'pointer',
+                background: '#C9A84C', border: 'none', color: '#0A1F44',
+                fontSize: 11, fontWeight: 700, opacity: saving || !pending ? 0.6 : 1,
+              }}
+            >
+              {saving ? 'Saving...' : 'Save Status'}
+            </button>
+            <button
+              onClick={() => { setEditing(false); setPending(null); setNotes('') }}
+              style={{
+                padding: '7px 12px', borderRadius: 5, cursor: 'pointer',
+                background: 'rgba(255,255,255,0.05)', border: '1px solid #1a3050',
+                color: '#94a3b8', fontSize: 11,
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </Card>
+  )
 }
 
 const STRATEGY_LABELS: Record<string, string> = {
@@ -325,10 +549,11 @@ interface MarketAnalysisProps {
   mlsLoading:    boolean
   mlsError:      string | null
   noCredentials: boolean
+  mlsCached:     boolean
   onFetch:       (filter?: CompsFilter) => void
 }
 
-function MarketAnalysisModule({ leadAddress, mlsComps, mlsLoading, mlsError, noCredentials, onFetch }: MarketAnalysisProps) {
+function MarketAnalysisModule({ leadAddress, mlsComps, mlsLoading, mlsError, noCredentials, mlsCached, onFetch }: MarketAnalysisProps) {
   const { lead, comps } = useWorkspace()
   const [showFilters, setShowFilters] = useState(false)
   const [filter,      setFilter]      = useState<CompsFilter>(DEFAULT_FILTER)
@@ -499,11 +724,18 @@ function MarketAnalysisModule({ leadAddress, mlsComps, mlsLoading, mlsError, noC
     <div>
       <CtrlBar />
       <Card style={{ textAlign: 'center' as const, padding: 20 }}>
-        <div style={{ fontSize: 11, color: '#4a6a9a', marginBottom: 10 }}>Click Refresh to pull live comps for this address.</div>
-        <button onClick={() => onFetch(filter)} disabled={mlsLoading}
-          style={{ padding: '5px 16px', background: '#1a3050', border: '1px solid #4CAF9A44', color: '#4CAF9A', borderRadius: 5, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
-          {mlsLoading ? 'Fetching…' : '↻ Fetch Comps'}
-        </button>
+        {mlsCached ? (
+          // API confirmed data is fresh but we have no comps in state — genuinely no results
+          <div style={{ fontSize: 11, color: '#4a6a9a' }}>No MLS comps available.</div>
+        ) : (
+          <>
+            <div style={{ fontSize: 11, color: '#4a6a9a', marginBottom: 10 }}>Click Refresh to pull live comps for this address.</div>
+            <button onClick={() => onFetch(filter)} disabled={mlsLoading}
+              style={{ padding: '5px 16px', background: '#1a3050', border: '1px solid #4CAF9A44', color: '#4CAF9A', borderRadius: 5, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
+              {mlsLoading ? 'Fetching…' : '↻ Fetch Comps'}
+            </button>
+          </>
+        )}
       </Card>
     </div>
   )
@@ -514,6 +746,12 @@ function MarketAnalysisModule({ leadAddress, mlsComps, mlsLoading, mlsError, noC
   return (
     <div>
       <CtrlBar />
+
+      {mlsCached && (
+        <div style={{ fontSize: 10, color: '#4a6a9a', textAlign: 'center' as const, marginBottom: 8 }}>
+          ✓ MLS comps are up to date
+        </div>
+      )}
 
       {/* Filter panel */}
       {showFilters && (
@@ -854,10 +1092,13 @@ function DistressedAnalysisModule() {
     'palm-beach': 'https://courtrecords.mypalmbeachclerk.com/DORIS',
   }
 
-  const hasDistress = lead.is_foreclosure || lead.is_pre_foreclosure || lead.file_date
+  const hasDistress = lead.is_foreclosure || lead.is_pre_foreclosure || lead.file_date || lead.foreclosure_status_override
 
   return (
     <div>
+      {/* Foreclosure Status Override */}
+      <ForeclosureStatusEditor />
+
       {/* Distress Timeline */}
       {ds !== null && (
         <div style={{ background: '#0A1F44', borderRadius: 8, padding: 16, marginBottom: 12 }}>
@@ -1445,6 +1686,7 @@ export default function AnalyzeTab() {
   const [mlsLoading,    setMlsLoading]    = useState(false)
   const [mlsError,      setMlsError]      = useState<string | null>(null)
   const [noCredentials, setNoCredentials] = useState(false)
+  const [mlsCached,     setMlsCached]     = useState(false)
 
   const fetchComps = useCallback(async (filter: CompsFilter = DEFAULT_FILTER) => {
     if (!leadAddress) return
@@ -1458,15 +1700,23 @@ export default function AnalyzeTab() {
       if (filter.maxPrice)     p.set('maxPrice', filter.maxPrice)
       if (filter.beds)         p.set('beds', filter.beds)
       if (filter.baths)        p.set('baths', filter.baths)
+      // Pass property_id so the API can gate on the comps freshness TTL (14 days)
+      const pid = lead.property_id ?? lead.id
+      if (pid) p.set('property_id', pid)
       const res  = await fetch(`/api/mls/comps?${p}`)
       const data = await res.json()
       if (!res.ok) {
+        setMlsCached(false)
         if (data.code === 'NO_CREDENTIALS') setNoCredentials(true)
         else setMlsError(data.error ?? 'Failed to fetch comps')
+      } else if (data.cached) {
+        // Data is within the 14-day freshness window — keep existing comp state unchanged
+        setMlsCached(true)
       } else {
+        setMlsCached(false)
         setMlsComps(data as MlsCompsResult)
       }
-    } catch { setMlsError('Network error — please try again') }
+    } catch { setMlsCached(false); setMlsError('Network error — please try again') }
     finally   { setMlsLoading(false) }
   }, [leadAddress])
 
@@ -1474,7 +1724,8 @@ export default function AnalyzeTab() {
   useEffect(() => { if (comps.length === 0) fetchComps() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Summary values for collapsed module headers
-  const hasDistress   = !!(lead.is_foreclosure || lead.is_pre_foreclosure || lead.file_date)
+  const hasDistress   = !!(lead.is_foreclosure || lead.is_pre_foreclosure || lead.file_date || lead.foreclosure_status_override)
+  const effectiveFC   = lead.foreclosure_status_override ?? (lead.is_foreclosure ? 'Active FC' : lead.is_pre_foreclosure ? 'Pre-FC' : null)
   const distressDays  = daysSince(lead.file_date)
   const marketVal     = Number(lead.market_value ?? 0)
   const loanBalance   = Number(lead.foreclosure_amount ?? 0)
@@ -1502,6 +1753,7 @@ export default function AnalyzeTab() {
           mlsLoading={mlsLoading}
           mlsError={mlsError}
           noCredentials={noCredentials}
+          mlsCached={mlsCached}
           onFetch={fetchComps}
         />
       </ModuleCard>
@@ -1522,8 +1774,8 @@ export default function AnalyzeTab() {
       <ModuleCard
         icon={Icons.distress}
         title="Distressed Analysis"
-        badge={hasDistress ? (lead.is_foreclosure ? 'Active FC' : 'Pre-FC') : undefined}
-        badgeColor="#E07B6A"
+        badge={hasDistress && effectiveFC ? effectiveFC : undefined}
+        badgeColor={effectiveFC ? (FC_STATUS_COLORS[effectiveFC] ?? '#E07B6A') : '#E07B6A'}
         defaultExpanded={hasDistress}
         summaryItems={[
           ...(distressDays != null ? [{ label: 'days', value: String(distressDays), color: distressColor(distressDays) }] : []),
@@ -1588,6 +1840,9 @@ export default function AnalyzeTab() {
       >
         <STRModule />
       </ModuleCard>
+
+      {/* ── Data Passport ────────────────────────────────────────────────────── */}
+      <DataPassportPanel />
     </div>
   )
 }

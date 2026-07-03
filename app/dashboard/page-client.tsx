@@ -40,7 +40,9 @@ import OffersContracts    from './widgets/OffersContracts'
 import RecentActivity     from './widgets/RecentActivity'
 import MonthlyKPIs        from './widgets/MonthlyKPIs'
 import LeadTypeBreakdown  from './widgets/LeadTypeBreakdown'
-import QuickActions       from './widgets/QuickActions'
+import QuickActions        from './widgets/QuickActions'
+import AcquisitionMetrics  from './widgets/AcquisitionMetrics'
+import DataSourceMetrics   from './widgets/DataSourceMetrics'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -272,6 +274,10 @@ export default function DashboardClient() {
         return <LeadTypeBreakdown items={data.lead_type_breakdown ?? []} />
       case 'quick_actions':
         return <QuickActions />
+      case 'acquisition_metrics':
+        return <AcquisitionMetrics />
+      case 'data_source_metrics':
+        return <DataSourceMetrics />
       default:
         return null
     }

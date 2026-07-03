@@ -57,6 +57,16 @@ interface OfferProfile {
   is_default: boolean
 }
 
+interface OfferRow {
+  id: string
+  purchase_price: number
+  earnest_money?: number | null
+  financing_type?: string | null
+  closing_days?: number | null
+  inspection_days?: number | null
+  offer_pct?: number | null
+}
+
 interface Props {
   onClose: () => void
   defaultLeadId?: string
@@ -88,13 +98,13 @@ const CATEGORY_COLORS: Record<string, string> = {
 
 const inp: React.CSSProperties = {
   width: '100%', padding: '9px 12px', borderRadius: 8, fontSize: 13,
-  border: '1px solid var(--c-border)', backgroundColor: 'var(--c-input-bg)',
+  border: '1px solid var(--c-input-border)', backgroundColor: 'var(--c-input-bg)',
   color: 'var(--c-primary)', boxSizing: 'border-box',
 }
 
 const searchInp: React.CSSProperties = {
   width: '100%', padding: '10px 14px', borderRadius: 10, fontSize: 14,
-  border: '1px solid var(--c-border)', backgroundColor: 'var(--c-input-bg)',
+  border: '1px solid var(--c-input-border)', backgroundColor: 'var(--c-input-bg)',
   color: 'var(--c-primary)', boxSizing: 'border-box', outline: 'none',
 }
 
@@ -117,6 +127,7 @@ export default function GenerateContractModal({
   const [selectedContact,  setSelectedContact]  = useState<ContactResult | null>(null)
   const [selectedDeal,     setSelectedDeal]     = useState<DealResult | null>(null)
   const [selectedProfile,  setSelectedProfile]  = useState<OfferProfile | null>(null)
+  const [latestOffer,      setLatestOffer]      = useState<OfferRow | null>(null)
 
   // Logged-in user's profile (default buyer)
   const [userProfile, setUserProfile] = useState<{ name: string; email: string; phone: string } | null>(null)
@@ -176,12 +187,22 @@ export default function GenerateContractModal({
     }).catch(() => {})
 
     if (defaultPropertyId) {
-      fetch(`/api/properties?search=&limit=1&id=${defaultPropertyId}`)
-        .then(r => r.json())
-        .then(d => { if (d.properties?.[0]) setSelectedProperty(d.properties[0]) })
+      // Use the single-property endpoint (SELECT *) — the list API ignores the id param
+      fetch(`/api/properties/${defaultPropertyId}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d?.id) setSelectedProperty(d) })
         .catch(() => {})
     }
   }, [defaultPropertyId, defaultContactId])
+
+  // ── Auto-load latest offer when property changes ─────────────────────────────
+  useEffect(() => {
+    if (!selectedProperty) { setLatestOffer(null); return }
+    fetch(`/api/offers?property_id=${selectedProperty.id}&latest=true`)
+      .then(r => r.ok ? r.json() : null)
+      .then((d: { offer: OfferRow | null } | null) => { setLatestOffer(d?.offer ?? null) })
+      .catch(() => {})
+  }, [selectedProperty])
 
   // ── Search handlers ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -247,6 +268,7 @@ export default function GenerateContractModal({
       property:         selectedProperty ? (selectedProperty as unknown as Record<string, unknown>) : undefined,
       contact:          selectedContact  ? (selectedContact  as unknown as Record<string, unknown>) : undefined,
       deal:             selectedDeal     ? (selectedDeal     as unknown as Record<string, unknown>) : undefined,
+      offer:            latestOffer      ? (latestOffer      as unknown as Record<string, unknown>) : undefined,
       contractSettings: cs,
       titleCompany:     defaultTC,
       offerProfile:     selectedProfile  ? (selectedProfile  as unknown as Record<string, unknown>) : undefined,
@@ -311,6 +333,7 @@ export default function GenerateContractModal({
             contact_id:        selectedContact?.id ?? defaultContactId ?? null,
             lead_id:           selectedProperty?.id ?? defaultLeadId   ?? null,
             deal_id:           selectedDeal?.id     ?? defaultDealId   ?? null,
+            offer_id:          latestOffer?.id      ?? null,
             save_as_document:  true,
           }),
         })
@@ -350,16 +373,16 @@ export default function GenerateContractModal({
     value ? (
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '12px 16px', borderRadius: 10, backgroundColor: 'rgba(201,168,76,0.08)',
-        border: '1px solid rgba(201,168,76,0.3)', marginBottom: 16,
+        padding: '12px 16px', borderRadius: 10, backgroundColor: 'rgba(201,168,76,0.12)',
+        border: '1px solid rgba(201,168,76,0.5)', marginBottom: 16,
       }}>
         <div>
           <p style={{ fontSize: 11, color: '#C9A84C', fontWeight: 600, marginBottom: 2 }}>{label}</p>
-          <p style={{ fontSize: 14, fontWeight: 600 }}>{value}</p>
-          {sub && <p style={{ fontSize: 12, color: 'var(--c-text-2)' }}>{sub}</p>}
+          <p style={{ fontSize: 14, fontWeight: 700, color: 'var(--c-primary)' }}>{value}</p>
+          {sub && <p style={{ fontSize: 12, color: 'var(--c-text-1)' }}>{sub}</p>}
         </div>
         {onClear && (
-          <button onClick={onClear} style={{ background: 'none', border: 'none', color: 'var(--c-text-2)', fontSize: 18, cursor: 'pointer', lineHeight: 1 }}>×</button>
+          <button onClick={onClear} style={{ background: 'none', border: 'none', color: 'var(--c-text-1)', fontSize: 18, cursor: 'pointer', lineHeight: 1 }}>×</button>
         )}
       </div>
     ) : null
@@ -376,13 +399,13 @@ export default function GenerateContractModal({
       onClick={onClick}
       style={{
         width: '100%', textAlign: 'left', padding: '12px 16px', borderRadius: 10,
-        border: `1px solid ${selected ? '#C9A84C' : 'var(--c-border)'}`,
-        backgroundColor: selected ? 'rgba(201,168,76,0.08)' : 'var(--c-hover)',
+        border: `1px solid ${selected ? 'rgba(201,168,76,0.6)' : 'var(--c-border-strong)'}`,
+        backgroundColor: selected ? 'rgba(201,168,76,0.12)' : 'var(--c-card)',
         cursor: 'pointer', marginBottom: 8,
       }}
     >
-      <p style={{ fontSize: 14, fontWeight: selected ? 600 : 500, color: selected ? '#C9A84C' : 'var(--c-primary)', marginBottom: 2 }}>{primary}</p>
-      <p style={{ fontSize: 12, color: 'var(--c-text-2)' }}>{secondary}</p>
+      <p style={{ fontSize: 14, fontWeight: selected ? 700 : 500, color: 'var(--c-primary)', marginBottom: 2 }}>{primary}</p>
+      <p style={{ fontSize: 12, color: 'var(--c-text-1)' }}>{secondary}</p>
     </button>
   )
 
@@ -396,8 +419,8 @@ export default function GenerateContractModal({
 
   const renderTemplate = () => (
     <div>
-      <p style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Select Contract Template(s)</p>
-      <p style={{ fontSize: 13, color: 'var(--c-text-2)', marginBottom: 16 }}>
+      <p style={{ fontSize: 15, fontWeight: 700, color: 'var(--c-primary)', marginBottom: 4 }}>Select Contract Template(s)</p>
+      <p style={{ fontSize: 13, color: 'var(--c-text-1)', marginBottom: 16 }}>
         Check one or more templates to generate at once — e.g. FAR/BAR As Is + Lead Based Paint Disclosure.
       </p>
 
@@ -431,7 +454,7 @@ export default function GenerateContractModal({
       />
 
       {templates.length === 0 && (
-        <p style={{ fontSize: 13, color: 'var(--c-text-2)', padding: '16px 0', textAlign: 'center' }}>
+        <p style={{ fontSize: 13, color: 'var(--c-text-1)', padding: '16px 0', textAlign: 'center' }}>
           No templates found.{' '}
           <a href="/documents/templates" style={{ color: '#C9A84C' }}>
             Build one in Templates →
@@ -449,15 +472,15 @@ export default function GenerateContractModal({
               onClick={() => toggleTemplate(t)}
               style={{
                 textAlign: 'left', padding: '14px 18px', borderRadius: 12,
-                border: `1px solid ${isChecked ? '#C9A84C' : 'var(--c-border)'}`,
-                backgroundColor: isChecked ? 'rgba(201,168,76,0.08)' : 'var(--c-card)',
+                border: `1px solid ${isChecked ? 'rgba(201,168,76,0.6)' : 'var(--c-border-strong)'}`,
+                backgroundColor: isChecked ? 'rgba(201,168,76,0.12)' : 'var(--c-card)',
                 cursor: 'pointer', display: 'flex', alignItems: 'flex-start', gap: 14,
               }}
             >
               {/* Checkbox */}
               <div style={{
                 width: 20, height: 20, borderRadius: 6, flexShrink: 0, marginTop: 2,
-                border: `2px solid ${isChecked ? '#C9A84C' : 'var(--c-border)'}`,
+                border: `2px solid ${isChecked ? '#C9A84C' : 'rgba(255,255,255,0.25)'}`,
                 backgroundColor: isChecked ? '#C9A84C' : 'transparent',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}>
@@ -466,7 +489,7 @@ export default function GenerateContractModal({
 
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
-                  <span style={{ fontWeight: 600, fontSize: 14, color: isChecked ? '#C9A84C' : 'var(--c-primary)' }}>
+                  <span style={{ fontWeight: isChecked ? 700 : 600, fontSize: 14, color: 'var(--c-primary)' }}>
                     {t.name}
                   </span>
                   <span style={{
@@ -483,13 +506,13 @@ export default function GenerateContractModal({
                     {t.type === 'pdf' ? 'PDF' : 'Text'}
                   </span>
                   {t.is_builtin && (
-                    <span style={{ fontSize: 10, color: 'var(--c-text-2)', padding: '2px 6px', borderRadius: 5, backgroundColor: 'var(--c-hover)' }}>
+                    <span style={{ fontSize: 10, color: 'var(--c-text-1)', padding: '2px 6px', borderRadius: 5, backgroundColor: 'var(--c-hover)' }}>
                       Built-in
                     </span>
                   )}
                 </div>
-                {t.description && <p style={{ fontSize: 12, color: 'var(--c-text-2)' }}>{t.description}</p>}
-                <p style={{ fontSize: 11, color: 'var(--c-text-2)', marginTop: 4 }}>
+                {t.description && <p style={{ fontSize: 12, color: 'var(--c-text-1)' }}>{t.description}</p>}
+                <p style={{ fontSize: 11, color: 'var(--c-text-1)', marginTop: 4 }}>
                   {t.type === 'pdf'
                     ? `${(t.field_mappings as unknown[])?.length ?? 0} mapped fields — downloads as PDF`
                     : `${Array.isArray(t.variables) ? t.variables.length : 0} auto-fill fields`
@@ -505,8 +528,8 @@ export default function GenerateContractModal({
 
   const renderProperty = () => (
     <div>
-      <p style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Select Property</p>
-      <p style={{ fontSize: 13, color: 'var(--c-text-2)', marginBottom: 16 }}>Search for the subject property to pull address, county, and parcel data.</p>
+      <p style={{ fontSize: 15, fontWeight: 700, color: 'var(--c-primary)', marginBottom: 4 }}>Select Property</p>
+      <p style={{ fontSize: 13, color: 'var(--c-text-1)', marginBottom: 16 }}>Search for the subject property to pull address, county, and parcel data.</p>
       {selCard('Selected Property', selectedProperty?.property_address ?? null, [selectedProperty?.county, selectedProperty?.city].filter(Boolean).join(', '), () => setSelectedProperty(null))}
       <input
         value={propSearch}
@@ -515,7 +538,7 @@ export default function GenerateContractModal({
         style={searchInp}
       />
       <div style={{ marginTop: 12 }}>
-        {propLoading && <p style={{ fontSize: 13, color: 'var(--c-text-2)', padding: '8px 0' }}>Searching…</p>}
+        {propLoading && <p style={{ fontSize: 13, color: 'var(--c-text-1)', padding: '8px 0' }}>Searching…</p>}
         {propResults.map(p => resultItem(
           p.property_address,
           [p.owner_name, p.county, p.folio_number].filter(Boolean).join(' · '),
@@ -523,11 +546,11 @@ export default function GenerateContractModal({
           selectedProperty?.id === p.id,
         ))}
         {propSearch.length >= 2 && !propLoading && propResults.length === 0 && (
-          <p style={{ fontSize: 13, color: 'var(--c-text-2)', padding: '8px 0' }}>No results found.</p>
+          <p style={{ fontSize: 13, color: 'var(--c-text-1)', padding: '8px 0' }}>No results found.</p>
         )}
       </div>
       <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--c-border)' }}>
-        <button onClick={() => setStep('contact')} style={{ fontSize: 13, color: 'var(--c-text-2)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+        <button onClick={() => setStep('contact')} style={{ fontSize: 13, color: 'var(--c-text-1)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
           Skip — no property to link →
         </button>
       </div>
@@ -538,8 +561,8 @@ export default function GenerateContractModal({
     const showSearch = overridingBuyer || !userProfile || selectedContact !== null
     return (
       <div>
-        <p style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Buyer</p>
-        <p style={{ fontSize: 13, color: 'var(--c-text-2)', marginBottom: 16 }}>
+        <p style={{ fontSize: 15, fontWeight: 700, color: 'var(--c-primary)', marginBottom: 4 }}>Buyer</p>
+        <p style={{ fontSize: 13, color: 'var(--c-text-1)', marginBottom: 16 }}>
           Defaults to your profile. Override only if someone else is the buyer.
         </p>
 
@@ -556,14 +579,14 @@ export default function GenerateContractModal({
           <div style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             padding: '12px 16px', borderRadius: 10,
-            backgroundColor: 'rgba(201,168,76,0.08)', border: '1px solid rgba(201,168,76,0.3)',
+            backgroundColor: 'rgba(201,168,76,0.12)', border: '1px solid rgba(201,168,76,0.5)',
             marginBottom: 16,
           }}>
             <div>
               <p style={{ fontSize: 11, color: '#C9A84C', fontWeight: 600, marginBottom: 2 }}>Buyer — You (Account Default)</p>
-              <p style={{ fontSize: 14, fontWeight: 600 }}>{userProfile.name}</p>
+              <p style={{ fontSize: 14, fontWeight: 700, color: 'var(--c-primary)' }}>{userProfile.name}</p>
               {(userProfile.phone || userProfile.email) && (
-                <p style={{ fontSize: 12, color: 'var(--c-text-2)' }}>
+                <p style={{ fontSize: 12, color: 'var(--c-text-1)' }}>
                   {[userProfile.phone, userProfile.email].filter(Boolean).join(' · ')}
                 </p>
               )}
@@ -590,7 +613,7 @@ export default function GenerateContractModal({
               autoFocus
             />
             <div style={{ marginTop: 12 }}>
-              {contactLoading && <p style={{ fontSize: 13, color: 'var(--c-text-2)', padding: '8px 0' }}>Searching…</p>}
+              {contactLoading && <p style={{ fontSize: 13, color: 'var(--c-text-1)', padding: '8px 0' }}>Searching…</p>}
               {contactResults.map(c => resultItem(
                 c.name,
                 [c.phone, c.email, c.category].filter(Boolean).join(' · '),
@@ -598,14 +621,14 @@ export default function GenerateContractModal({
                 false,
               ))}
               {contactSearch.length >= 2 && !contactLoading && contactResults.length === 0 && (
-                <p style={{ fontSize: 13, color: 'var(--c-text-2)', padding: '8px 0' }}>No contacts found.</p>
+                <p style={{ fontSize: 13, color: 'var(--c-text-1)', padding: '8px 0' }}>No contacts found.</p>
               )}
             </div>
           </>
         )}
 
         <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--c-border)' }}>
-          <button onClick={() => setStep('deal')} style={{ fontSize: 13, color: 'var(--c-text-2)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+          <button onClick={() => setStep('deal')} style={{ fontSize: 13, color: 'var(--c-text-1)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
             Continue without linking a buyer →
           </button>
         </div>
@@ -615,8 +638,8 @@ export default function GenerateContractModal({
 
   const renderDeal = () => (
     <div>
-      <p style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Link a Deal <span style={{ fontWeight: 400, fontSize: 13, color: 'var(--c-text-2)' }}>(optional)</span></p>
-      <p style={{ fontSize: 13, color: 'var(--c-text-2)', marginBottom: 16 }}>Linking a deal pulls offer price, closing date, and EMD into the contract.</p>
+      <p style={{ fontSize: 15, fontWeight: 700, color: 'var(--c-primary)', marginBottom: 4 }}>Link a Deal <span style={{ fontWeight: 400, fontSize: 13, color: 'var(--c-text-1)' }}>(optional)</span></p>
+      <p style={{ fontSize: 13, color: 'var(--c-text-1)', marginBottom: 16 }}>Linking a deal pulls offer price, closing date, and EMD into the contract.</p>
       {selCard('Selected Deal', selectedDeal?.address ?? null, selectedDeal ? `${selectedDeal.status}${selectedDeal.offer_price ? ' · $' + Number(selectedDeal.offer_price).toLocaleString() : ''}` : undefined, () => setSelectedDeal(null))}
       <input
         value={dealSearch}
@@ -625,7 +648,7 @@ export default function GenerateContractModal({
         style={searchInp}
       />
       <div style={{ marginTop: 12 }}>
-        {dealLoading && <p style={{ fontSize: 13, color: 'var(--c-text-2)', padding: '8px 0' }}>Searching…</p>}
+        {dealLoading && <p style={{ fontSize: 13, color: 'var(--c-text-1)', padding: '8px 0' }}>Searching…</p>}
         {dealResults.map(d => resultItem(
           d.address,
           [d.status, d.offer_price ? '$' + Number(d.offer_price).toLocaleString() : null].filter(Boolean).join(' · '),
@@ -633,13 +656,13 @@ export default function GenerateContractModal({
           selectedDeal?.id === d.id,
         ))}
         {dealResults.length === 0 && !dealLoading && (
-          <p style={{ fontSize: 13, color: 'var(--c-text-2)', padding: '8px 0' }}>
+          <p style={{ fontSize: 13, color: 'var(--c-text-1)', padding: '8px 0' }}>
             {dealSearch.length >= 2 ? 'No deals found.' : 'Start typing to search deals…'}
           </p>
         )}
       </div>
       <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--c-border)' }}>
-        <button onClick={() => setStep('profile')} style={{ fontSize: 13, color: 'var(--c-text-2)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+        <button onClick={() => setStep('profile')} style={{ fontSize: 13, color: 'var(--c-text-1)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
           Skip — no deal to link →
         </button>
       </div>
@@ -648,19 +671,19 @@ export default function GenerateContractModal({
 
   const renderProfile = () => (
     <div>
-      <p style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Select Offer Profile</p>
-      <p style={{ fontSize: 13, color: 'var(--c-text-2)', marginBottom: 20 }}>Profiles set the buyer name, timelines, and EMD for a specific deal type.</p>
+      <p style={{ fontSize: 15, fontWeight: 700, color: 'var(--c-primary)', marginBottom: 4 }}>Select Offer Profile</p>
+      <p style={{ fontSize: 13, color: 'var(--c-text-1)', marginBottom: 20 }}>Profiles set the buyer name, timelines, and EMD for a specific deal type.</p>
 
       <button
         onClick={() => setSelectedProfile(null)}
         style={{
           width: '100%', textAlign: 'left', padding: '12px 16px', borderRadius: 10, marginBottom: 8,
-          border: `1px solid ${selectedProfile === null ? '#C9A84C' : 'var(--c-border)'}`,
-          backgroundColor: selectedProfile === null ? 'rgba(201,168,76,0.08)' : 'var(--c-hover)',
+          border: `1px solid ${selectedProfile === null ? 'rgba(201,168,76,0.6)' : 'var(--c-border-strong)'}`,
+          backgroundColor: selectedProfile === null ? 'rgba(201,168,76,0.12)' : 'var(--c-card)',
           cursor: 'pointer',
         }}
       >
-        <p style={{ fontSize: 14, fontWeight: 500, color: selectedProfile === null ? '#C9A84C' : 'var(--c-text-2)' }}>
+        <p style={{ fontSize: 14, fontWeight: selectedProfile === null ? 600 : 500, color: 'var(--c-primary)' }}>
           No profile — use contract defaults only
         </p>
       </button>
@@ -671,20 +694,20 @@ export default function GenerateContractModal({
           onClick={() => setSelectedProfile(p)}
           style={{
             width: '100%', textAlign: 'left', padding: '14px 18px', borderRadius: 10, marginBottom: 8,
-            border: `1px solid ${selectedProfile?.id === p.id ? '#C9A84C' : 'var(--c-border)'}`,
-            backgroundColor: selectedProfile?.id === p.id ? 'rgba(201,168,76,0.08)' : 'var(--c-card)',
+            border: `1px solid ${selectedProfile?.id === p.id ? 'rgba(201,168,76,0.6)' : 'var(--c-border-strong)'}`,
+            backgroundColor: selectedProfile?.id === p.id ? 'rgba(201,168,76,0.12)' : 'var(--c-card)',
             cursor: 'pointer',
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-            <span style={{ fontWeight: 600, fontSize: 14, color: selectedProfile?.id === p.id ? '#C9A84C' : 'var(--c-primary)' }}>
+            <span style={{ fontWeight: selectedProfile?.id === p.id ? 700 : 600, fontSize: 14, color: 'var(--c-primary)' }}>
               {p.name}
             </span>
             {p.is_default && (
               <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4, backgroundColor: 'rgba(201,168,76,0.12)', color: '#C9A84C' }}>Default</span>
             )}
           </div>
-          <p style={{ fontSize: 12, color: 'var(--c-text-2)' }}>
+          <p style={{ fontSize: 12, color: 'var(--c-text-1)' }}>
             {[
               p.buyer_name && `Buyer: ${p.buyer_name}`,
               p.closing_days && `${p.closing_days}d close`,
@@ -696,7 +719,7 @@ export default function GenerateContractModal({
       ))}
 
       {offerProfiles.length === 0 && (
-        <p style={{ fontSize: 13, color: 'var(--c-text-2)', marginTop: 8 }}>
+        <p style={{ fontSize: 13, color: 'var(--c-text-1)', marginTop: 8 }}>
           No profiles yet.{' '}
           <a href="/settings/offer-profiles" target="_blank" style={{ color: '#C9A84C' }}>
             Create one in Settings →
@@ -708,8 +731,8 @@ export default function GenerateContractModal({
 
   const renderReview = () => (
     <div>
-      <p style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Review &amp; Generate</p>
-      <p style={{ fontSize: 13, color: 'var(--c-text-2)', marginBottom: 20 }}>
+      <p style={{ fontSize: 15, fontWeight: 700, color: 'var(--c-primary)', marginBottom: 4 }}>Review &amp; Generate</p>
+      <p style={{ fontSize: 13, color: 'var(--c-text-1)', marginBottom: 20 }}>
         {hasPdfTemplate && !hasTextTemplate
           ? 'PDF templates will download automatically with fields pre-filled.'
           : 'All fields have been auto-filled. Edit anything before generating.'}
@@ -726,9 +749,9 @@ export default function GenerateContractModal({
         ].filter(Boolean).map((item) => {
           const it = item as { label: string; val: string }
           return (
-            <div key={it.label} style={{ padding: '10px 14px', borderRadius: 9, backgroundColor: 'var(--c-hover)', border: '1px solid var(--c-border)' }}>
-              <p style={{ fontSize: 10, color: 'var(--c-text-2)', fontWeight: 600, marginBottom: 2 }}>{it.label}</p>
-              <p style={{ fontSize: 13, fontWeight: 500 }}>{it.val}</p>
+            <div key={it.label} style={{ padding: '10px 14px', borderRadius: 9, backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+              <p style={{ fontSize: 10, color: 'var(--c-text-1)', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', marginBottom: 3 }}>{it.label}</p>
+              <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--c-primary)' }}>{it.val}</p>
             </div>
           )
         })}
@@ -739,9 +762,9 @@ export default function GenerateContractModal({
         <div style={{ marginBottom: 16, padding: '12px 16px', borderRadius: 10, backgroundColor: 'rgba(74,207,154,0.08)', border: '1px solid rgba(74,207,154,0.25)' }}>
           <p style={{ fontSize: 12, fontWeight: 700, color: '#4ACF9A', marginBottom: 6 }}>Will fill and open for e-signature:</p>
           {selectedTemplates.filter(t => t.type === 'pdf').map(t => (
-            <p key={t.id} style={{ fontSize: 13, color: 'var(--c-primary)' }}>✍ {t.name}</p>
+            <p key={t.id} style={{ fontSize: 13, fontWeight: 600, color: 'var(--c-primary)' }}>✍ {t.name}</p>
           ))}
-          <p style={{ fontSize: 11, color: 'var(--c-text-2)', marginTop: 6 }}>You&apos;ll place signature fields and send to all parties from the next screen.</p>
+          <p style={{ fontSize: 11, color: 'var(--c-text-1)', marginTop: 6 }}>You&apos;ll place signature fields and send to all parties from the next screen.</p>
         </div>
       )}
 
@@ -749,23 +772,23 @@ export default function GenerateContractModal({
       {hasTextTemplate && (
         <>
           <div style={{ marginBottom: 16 }}>
-            <label style={{ fontSize: 12, color: 'var(--c-text-2)', display: 'block', marginBottom: 5 }}>Document Name</label>
+            <label style={{ fontSize: 12, color: 'var(--c-text-1)', fontWeight: 600, display: 'block', marginBottom: 5 }}>Document Name</label>
             <input value={docName} onChange={e => setDocName(e.target.value)} style={inp} placeholder="Contract name…" />
           </div>
           <div style={{ marginBottom: 20 }}>
-            <label style={{ fontSize: 12, color: 'var(--c-text-2)', display: 'block', marginBottom: 5 }}>Recipient Email (optional)</label>
+            <label style={{ fontSize: 12, color: 'var(--c-text-1)', fontWeight: 600, display: 'block', marginBottom: 5 }}>Recipient Email (optional)</label>
             <input value={recipientEmail} onChange={e => setRecipientEmail(e.target.value)} style={inp} placeholder="seller@email.com" type="email" />
           </div>
 
           {Object.keys(fields).length > 0 && (
             <>
-              <p style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--c-text-2)', marginBottom: 12 }}>
+              <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--c-text-1)', marginBottom: 12 }}>
                 Auto-Filled Contract Fields
               </p>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 {Object.entries(fields).map(([key, val]) => (
                   <div key={key}>
-                    <label style={{ fontSize: 11, color: 'var(--c-text-2)', display: 'block', marginBottom: 4 }}>
+                    <label style={{ fontSize: 11, color: 'var(--c-text-1)', fontWeight: 600, display: 'block', marginBottom: 4 }}>
                       {variableLabel(key)}
                     </label>
                     <input
@@ -807,8 +830,8 @@ export default function GenerateContractModal({
         <div style={{ padding: '20px 24px 0', borderBottom: '1px solid var(--c-border)', paddingBottom: 16, flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
             <div>
-              <p style={{ fontWeight: 700, fontSize: 18 }}>Generate Contract</p>
-              <p style={{ fontSize: 13, color: 'var(--c-text-2)' }}>Auto-fill from your records — ready in under 60 seconds</p>
+              <p style={{ fontWeight: 700, fontSize: 18, color: 'var(--c-primary)' }}>Generate Contract</p>
+              <p style={{ fontSize: 13, color: 'var(--c-text-1)' }}>Auto-fill from your records — ready in under 60 seconds</p>
             </div>
             <button onClick={onClose} style={{ width: 32, height: 32, borderRadius: 8, border: 'none', backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               ×
@@ -822,9 +845,10 @@ export default function GenerateContractModal({
                 onClick={() => { if (i <= currentIdx) setStep(s) }}
                 style={{
                   padding: '5px 12px', borderRadius: 20, fontSize: 11, fontWeight: 600,
-                  whiteSpace: 'nowrap', border: 'none', cursor: i <= currentIdx ? 'pointer' : 'default',
-                  backgroundColor: s === step ? '#C9A84C' : i < currentIdx ? 'rgba(201,168,76,0.15)' : 'var(--c-hover)',
-                  color: s === step ? '#0A1F44' : i < currentIdx ? '#C9A84C' : 'var(--c-text-2)',
+                  whiteSpace: 'nowrap', cursor: i <= currentIdx ? 'pointer' : 'default',
+                  backgroundColor: s === step ? '#C9A84C' : i < currentIdx ? 'rgba(201,168,76,0.15)' : 'var(--c-card)',
+                  border: s === step || i < currentIdx ? 'none' : '1px solid var(--c-border-strong)',
+                  color: s === step ? '#0A1F44' : i < currentIdx ? '#C9A84C' : 'var(--c-text-1)',
                 }}
               >
                 {i + 1}. {STEP_LABELS[s]}

@@ -29,11 +29,12 @@ export function buildAutoFill(opts: {
   lead?:             Record<string, unknown>
   contact?:          Record<string, unknown>
   deal?:             Record<string, unknown>
+  offer?:            Record<string, unknown>
   contractSettings?: Record<string, unknown>
   titleCompany?:     Record<string, unknown>
   offerProfile?:     Record<string, unknown>
 }): Record<string, string> {
-  const { user, property, lead, contact, deal, contractSettings, titleCompany, offerProfile } = opts
+  const { user, property, lead, contact, deal, offer, contractSettings, titleCompany, offerProfile } = opts
 
   const today = new Date()
   const fmt = (d: Date) => d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
@@ -43,9 +44,11 @@ export function buildAutoFill(opts: {
     return isNaN(d.getTime()) ? String(s) : fmt(d)
   }
 
-  // Days from settings/profile
-  const closingDays    = Number(offerProfile?.closing_days    ?? contractSettings?.closing_days    ?? 30)
-  const inspectionDays = Number(offerProfile?.inspection_days ?? contractSettings?.inspection_days ?? 10)
+  // Days: offer → offerProfile → contractSettings → defaults
+  // offer table takes highest priority as the canonical persisted source
+  const closingDays    = Number(offer?.closing_days    ?? offerProfile?.closing_days    ?? contractSettings?.closing_days    ?? 30)
+  const inspectionDays = Number(offer?.inspection_days ?? offerProfile?.inspection_days ?? contractSettings?.inspection_days ?? 10)
+  const depositDays    = Number(offer?.deposit_days    ?? contractSettings?.deposit_days    ?? 3)
   const acceptanceDays = Number(contractSettings?.acceptance_days ?? 3)
 
   const closingDate = new Date(today)
@@ -77,14 +80,22 @@ export function buildAutoFill(opts: {
     ''
   )
 
-  // Offer amount: deal → manual
-  const offerAmount = deal?.offer_price ? String(deal.offer_price) : ''
+  // Offer amount: offer (canonical) → deal → manual
+  const offerAmount = offer?.purchase_price
+    ? String(offer.purchase_price)
+    : deal?.offer_price ? String(deal.offer_price) : ''
 
-  // Earnest money: deal → offerProfile → contractSettings
-  const earnest = deal?.earnest_money
+  // Earnest money: offer → deal → offerProfile → contractSettings
+  const earnest = offer?.earnest_money
+    ?? deal?.earnest_money
     ?? offerProfile?.earnest_money
     ?? contractSettings?.earnest_money_amount
     ?? ''
+
+  // Financing type: offer → offerProfile → contractSettings
+  const financingType = String(
+    offer?.financing_type ?? offerProfile?.financing_type ?? contractSettings?.financing_type ?? 'Cash'
+  )
 
   // Buyer name: offerProfile → contractSettings → user
   const myName      = user?.my_name ?? user?.display_name ?? user?.email?.split('@')[0] ?? ''
@@ -93,8 +104,10 @@ export function buildAutoFill(opts: {
   const companyName = String(contractSettings?.company_name ?? user?.company_name ?? '')
   const buyerName   = String(offerProfile?.buyer_name ?? contractSettings?.buyer_name ?? myName)
 
-  // Closing date: prefer deal closing date, else auto-compute
-  const closingDateStr = deal?.closing_date ? fmtDate(deal.closing_date) : fmt(closingDate)
+  // Closing date: offer.closing_date → deal.closing_date → auto-compute
+  const closingDateStr = offer?.closing_date
+    ? fmtDate(offer.closing_date)
+    : deal?.closing_date ? fmtDate(deal.closing_date) : fmt(closingDate)
 
   return {
     date:               fmt(today),
@@ -110,7 +123,7 @@ export function buildAutoFill(opts: {
     seller_email:       String(contact?.email ?? ''),
     property_address:   address,
     property_city:      String(property?.city ?? ''),
-    property_state:     String(property?.owner_state ?? 'FL'),
+    property_state:     'FL',
     property_zip:       String(property?.zip ?? ''),
     county:             String(property?.county ?? lead?.county ?? ''),
     parcel_id:          parcelId,
@@ -118,7 +131,8 @@ export function buildAutoFill(opts: {
     offer_amount:       offerAmount,
     purchase_price:     offerAmount,
     earnest_money:      earnest ? String(earnest) : '',
-    earnest_days:       '3',
+    earnest_days:       String(depositDays),
+    financing_type:     financingType,
     closing_date:       closingDateStr,
     closing_days:       String(closingDays),
     inspection_days:    String(inspectionDays),
@@ -133,6 +147,8 @@ export function buildAutoFill(opts: {
     broker_name:        String(contractSettings?.broker_name ?? ''),
     license_number:     String(contractSettings?.license_number ?? ''),
     assignee_name:      '',
-    assignment_fee:     '',
+    assignment_fee:     String(offer?.assignment_fee ?? ''),
+    seller_concessions: String(offer?.seller_concessions ?? ''),
+    loan_amount:        String(offer?.loan_amount ?? ''),
   }
 }

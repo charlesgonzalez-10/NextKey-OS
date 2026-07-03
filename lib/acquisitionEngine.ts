@@ -62,6 +62,13 @@ export interface WorkspaceLead {
   case_number?: string | null
   foreclosure_type?: string | null
   foreclosure_amount?: number | null
+  surplus_funds_amount?: number | null
+  // Acquisition Operations (Phase 5.6)
+  acquisition_pipeline?: string | null
+  surplus_status?: string | null
+  assigned_to?: string | null
+  follow_up_at?: string | null
+  last_contact_at?: string | null
   is_pre_foreclosure?: boolean | null
   is_foreclosure?: boolean | null
   file_date?: string | null
@@ -115,6 +122,12 @@ export interface WorkspaceLead {
   opportunity_score?: number | null
   opportunity_label?: string | null
   opportunity_summary?: string | null
+  // Foreclosure override (operational — REAPI never writes these)
+  foreclosure_status_override?:   string | null
+  foreclosure_status_source?:     string | null
+  foreclosure_status_updated_at?: string | null
+  foreclosure_notes?:             string | null
+  foreclosure_reapi_changed?:     boolean | null
 }
 
 export interface WorkspaceNote {
@@ -233,7 +246,7 @@ export interface ProgressStep {
 
 // ─── Next Actions ──────────────────────────────────────────────────────────────
 
-export type TabId = 'overview' | 'people' | 'analyze' | 'offer' | 'documents' | 'comms' | 'close' | 'listing'
+export type TabId = 'overview' | 'people' | 'contact' | 'analyze' | 'offer' | 'documents' | 'comms' | 'close' | 'listing'
 
 export type ActionType =
   | 'navigate'

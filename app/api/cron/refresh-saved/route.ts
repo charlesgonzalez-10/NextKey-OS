@@ -19,6 +19,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { lookupCaseNumber } from '@/lib/ingestion/reapi-case-lookup'
+import { markModuleRefreshed } from '@/lib/propertyService'
 
 export const dynamic     = 'force-dynamic'
 export const maxDuration = 300
@@ -86,10 +87,48 @@ export async function GET(request: Request) {
   const props = savedProps ?? []
   let refreshed = 0, skipped = 0, errors = 0
 
-  console.log(`[RefreshSaved] Refreshing ${props.length} saved properties`)
+  // ── Batch freshness check — one query for all properties ─────────────────
+  // The foreclosure module has a 30-day TTL (shortest L2 tier).
+  // Any property whose foreclosure module is still fresh is skipped entirely —
+  // valuation (90d) and mortgage (90d) will also still be fresh by definition.
+  const FC_TTL_DAYS = 30
+  const { data: freshnessRows } = await supabase
+    .from('property_freshness')
+    .select('property_id, refreshed_at')
+    .in('property_id', props.map(p => p.id))
+    .eq('module', 'foreclosure')
 
-  for (const prop of props) {
-    if (!prop.folio_number) { skipped++; continue }
+  const nowMs = Date.now()
+  const freshIds = new Set(
+    (freshnessRows ?? [])
+      .filter(r => (nowMs - new Date(r.refreshed_at).getTime()) / 86_400_000 < FC_TTL_DAYS)
+      .map(r => r.property_id)
+  )
+
+  // ── Priority ordering via property_search_history ─────────────────────────
+  // Refresh high-frequency properties first in case the run hits a time limit.
+  // property_search_history tracks how often each property is opened in the workspace.
+  const staleProps = props.filter(p => p.folio_number && !freshIds.has(p.id))
+
+  const { data: searchRows } = await supabase
+    .from('property_search_history')
+    .select('property_id, search_frequency, search_count')
+    .in('property_id', staleProps.map(p => p.id))
+
+  const FREQ_ORDER: Record<string, number> = { high: 0, medium: 1, low: 2 }
+  const searchMap = new Map((searchRows ?? []).map(r => [r.property_id, r]))
+  staleProps.sort((a, b) => {
+    const fa = FREQ_ORDER[searchMap.get(a.id)?.search_frequency ?? ''] ?? 3
+    const fb = FREQ_ORDER[searchMap.get(b.id)?.search_frequency ?? ''] ?? 3
+    return fa - fb
+  })
+
+  // Properties with fresh foreclosure data are already skipped — count them
+  skipped += props.length - staleProps.length
+
+  console.log(`[RefreshSaved] ${props.length} total — ${staleProps.length} stale, ${freshIds.size} already fresh`)
+
+  for (const prop of staleProps) {
 
     try {
       const fresh = await fetchREAPIByAPN(prop.folio_number)
@@ -135,8 +174,18 @@ export async function GET(request: Request) {
         })
         .eq('id', prop.id)
 
-      if (updErr) { errors++; console.error(`[RefreshSaved] ${prop.folio_number}:`, updErr.message) }
-      else refreshed++
+      if (updErr) {
+        errors++
+        console.error(`[RefreshSaved] ${prop.folio_number}:`, updErr.message)
+      } else {
+        refreshed++
+        // Mark modules refreshed so the next cron run can skip this property
+        void Promise.all([
+          markModuleRefreshed(prop.id, 'foreclosure', 'reapi-cron'),
+          markModuleRefreshed(prop.id, 'valuation',   'reapi-cron'),
+          markModuleRefreshed(prop.id, 'mortgage',    'reapi-cron'),
+        ]).catch(() => {})
+      }
 
     } catch (err) {
       errors++

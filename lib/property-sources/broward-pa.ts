@@ -104,7 +104,9 @@ async function searchAddressForFolio(address: string, city?: string): Promise<st
 
 // ─── Parcel detail by folio ───────────────────────────────────────────────────
 
-async function fetchParcelDetail(folio: string): Promise<{ parcel: BCPARecord; recentSales: BCPARecord[] } | null> {
+async function fetchParcelDetail(rawFolio: string): Promise<{ parcel: BCPARecord; recentSales: BCPARecord[] } | null> {
+  // BCPA API requires folio with no dashes or separators (e.g. "484233080070" not "48-42-33-08-0070")
+  const folio = rawFolio.replace(/[^0-9]/g, '')
   const result = await bcpaFetch('search.aspx/getParcelInformation', {
     folioNumber: folio,
     taxyear: CURRENT_TAX_YEAR,

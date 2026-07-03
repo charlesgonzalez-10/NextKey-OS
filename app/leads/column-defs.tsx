@@ -151,6 +151,95 @@ function StarCell({ lead, onStar }: { lead: Lead; onStar: (id: string, v: boolea
 export const ALL_COLUMN_DEFS: ColumnDef[] = [
 
   // ─── Pipeline ────────────────────────────────────────────────────────────
+
+  // Acquisition pipeline
+  {
+    key: 'acquisition_pipeline', label: 'Acq. Pipeline', headerLabel: 'Pipeline', category: 'pipeline', defaultOn: false,
+    exportHeader: 'Acquisition Pipeline',
+    exportValue: (l) => l.acquisition_pipeline || '',
+    renderTd: (lead) => {
+      const PIPELINE_COLORS: Record<string, string> = {
+        'wholesale': '#C9A84C', 'retail': '#6ABDE0', 'pre-foreclosure': '#f59e0b',
+        'surplus-funds': '#4CAF9A', 'probate': '#a78bfa',
+      }
+      const PIPELINE_ICONS: Record<string, string> = {
+        'wholesale': '🏠', 'retail': '🏡', 'pre-foreclosure': '⚠️',
+        'surplus-funds': '💰', 'probate': '📋',
+      }
+      const p   = lead.acquisition_pipeline as string | null
+      const clr = p ? (PIPELINE_COLORS[p] ?? '#9ca3af') : '#9ca3af'
+      return (
+        <td className="py-3 pr-4 whitespace-nowrap">
+          {p
+            ? <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                style={{ backgroundColor: `${clr}20`, color: clr }}>
+                {PIPELINE_ICONS[p] ?? ''} {p.replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase())}
+              </span>
+            : <span className="text-[10px]" style={{ color: 'var(--c-text-3)' }}>—</span>}
+        </td>
+      )
+    },
+  },
+
+  // Surplus status
+  {
+    key: 'surplus_status', label: 'Surplus Status', headerLabel: 'Surplus', category: 'pipeline', defaultOn: false,
+    exportHeader: 'Surplus Status',
+    exportValue: (l) => l.surplus_status || '',
+    renderTd: (lead, ctx) => {
+      const st = lead.surplus_status as string | null
+      const SURPLUS_CFG: Record<string, { label: string; color: string }> = {
+        new:          { label: 'New',           color: '#6ABDE0' },
+        researching:  { label: 'Researching',   color: '#C9A84C' },
+        owner_found:  { label: 'Owner Found',   color: '#a78bfa' },
+        contacted:    { label: 'Contacted',     color: '#f59e0b' },
+        claim_filed:  { label: 'Claim Filed',   color: '#4CAF9A' },
+        paid:         { label: 'Paid',          color: '#22c55e' },
+        archived:     { label: 'Archived',      color: '#9ca3af' },
+      }
+      const cur = st ? (SURPLUS_CFG[st] ?? { label: st, color: '#9ca3af' }) : null
+      return (
+        <td className="py-3 pr-3 text-center" onClick={e => e.stopPropagation()}>
+          <select
+            value={st ?? ''}
+            onChange={e => ctx.onFieldChange?.(lead.id, 'surplus_status', e.target.value || null)}
+            className="text-[10px] font-bold rounded-full px-2 py-0.5 focus:outline-none cursor-pointer"
+            style={{
+              backgroundColor: cur ? `${cur.color}18` : 'var(--c-hover)',
+              color: cur ? cur.color : 'var(--c-text-3)',
+              border: `1px solid ${cur ? `${cur.color}40` : 'var(--c-border)'}`,
+            }}>
+            <option value="">—</option>
+            {Object.entries(SURPLUS_CFG).map(([v,c]) => <option key={v} value={v}>{c.label}</option>)}
+          </select>
+        </td>
+      )
+    },
+  },
+
+  // Follow-up date
+  {
+    key: 'follow_up_at', label: 'Follow-up', headerLabel: 'Follow-up', category: 'pipeline', defaultOn: false,
+    exportHeader: 'Follow-up Date',
+    exportValue: (l) => l.follow_up_at ? new Date(l.follow_up_at).toLocaleDateString('en-US') : '',
+    renderTd: (lead) => {
+      const d     = lead.follow_up_at ? new Date(lead.follow_up_at) : null
+      const today = new Date()
+      const isPast = d && d < today
+      const isToday = d && d.toDateString() === today.toDateString()
+      return (
+        <td className="py-3 pr-4 text-center">
+          {d
+            ? <span className="text-[10px] font-bold"
+                style={{ color: isPast ? '#ef4444' : isToday ? '#C9A84C' : 'var(--c-text-2)' }}>
+                {isToday ? 'Today' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+              </span>
+            : <span className="text-[10px]" style={{ color: 'var(--c-text-3)' }}>—</span>}
+        </td>
+      )
+    },
+  },
+
   {
     key: 'star', label: 'Starred', headerLabel: '★', category: 'pipeline', defaultOn: true,
     exportHeader: 'Starred',
@@ -587,6 +676,23 @@ export const ALL_COLUMN_DEFS: ColumnDef[] = [
         <p className="text-[11px] font-semibold" style={{ color: lead.foreclosure_amount ? '#ef4444' : 'var(--c-text-3)' }}>
           {lead.foreclosure_amount ? fmt$(lead.foreclosure_amount) : '—'}
         </p>
+      </td>
+    ),
+  },
+  {
+    key: 'surplus_funds', label: 'Surplus Funds', headerLabel: 'Surplus $', category: 'distress', defaultOn: false,
+    exportHeader: 'Surplus Funds',
+    exportValue: (l) => l.surplus_funds_amount ? String(l.surplus_funds_amount) : '',
+    renderTd: (lead) => (
+      <td className="py-3 pr-4 text-right">
+        {lead.surplus_funds_amount
+          ? <div>
+              <p className="text-[11px] font-semibold" style={{ color: '#4CAF9A' }}>
+                ${Number(lead.surplus_funds_amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </p>
+              <p className="text-[9px]" style={{ color: 'var(--c-text-3)' }}>owed to owner</p>
+            </div>
+          : <span className="text-[10px]" style={{ color: 'var(--c-text-3)' }}>—</span>}
       </td>
     ),
   },

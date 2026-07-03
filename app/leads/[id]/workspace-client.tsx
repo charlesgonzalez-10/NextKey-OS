@@ -19,14 +19,15 @@ import {
 import AcquisitionSidebar from '@/components/workspace/AcquisitionSidebar'
 
 // ── Lazy-load heavy tabs ──────────────────────────────────────────────────────
-const OverviewTab       = dynamic(() => import('@/components/workspace/tabs/OverviewTab'))
-const PeopleTab         = dynamic(() => import('@/components/workspace/tabs/PeopleTab'))
-const AnalyzeTab        = dynamic(() => import('@/components/workspace/tabs/AnalyzeTab'))
-const OfferTab          = dynamic(() => import('@/components/workspace/tabs/OfferTab'))
-const WorkspaceDocsTab  = dynamic(() => import('@/components/workspace/tabs/WorkspaceDocsTab'))
-const CommunicationsTab = dynamic(() => import('@/components/workspace/tabs/CommunicationsTab'))
-const CloseTab          = dynamic(() => import('@/components/workspace/tabs/CloseTab'))
-const ListingTab        = dynamic(() => import('@/components/workspace/tabs/ListingTab'))
+const OverviewTab              = dynamic(() => import('@/components/workspace/tabs/OverviewTab'))
+const PeopleTab                = dynamic(() => import('@/components/workspace/tabs/PeopleTab'))
+const ContactIntelligenceTab   = dynamic(() => import('@/components/workspace/tabs/ContactIntelligenceTab'))
+const AnalyzeTab               = dynamic(() => import('@/components/workspace/tabs/AnalyzeTab'))
+const OfferTab                 = dynamic(() => import('@/components/workspace/tabs/OfferTab'))
+const WorkspaceDocsTab         = dynamic(() => import('@/components/workspace/tabs/WorkspaceDocsTab'))
+const CommunicationsTab        = dynamic(() => import('@/components/workspace/tabs/CommunicationsTab'))
+const CloseTab                 = dynamic(() => import('@/components/workspace/tabs/CloseTab'))
+const ListingTab               = dynamic(() => import('@/components/workspace/tabs/ListingTab'))
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -50,6 +51,7 @@ interface WorkspaceCtx {
   refreshContacts: () => Promise<void>
   addNote: (body: string, noteType?: string) => Promise<void>
   updateLeadField: (fields: Record<string, unknown>) => Promise<void>
+  patchLeadLocal: (fields: Partial<WorkspaceLead>) => void
   isSaving: boolean
   // Enrichment
   onEnrich: (force?: boolean) => Promise<void>
@@ -76,6 +78,7 @@ export function useWorkspace(): WorkspaceCtx {
 const BASE_TABS: { id: TabId; label: string }[] = [
   { id: 'overview',    label: 'Overview' },
   { id: 'people',      label: 'People' },
+  { id: 'contact',     label: 'Contact Intelligence' },
   { id: 'analyze',     label: 'Analyze' },
   { id: 'offer',       label: 'Offer' },
   { id: 'documents',   label: 'Documents' },
@@ -211,6 +214,10 @@ export default function WorkspaceClient(props: WorkspaceClientProps) {
     }
   }, [propertyId])
 
+  const patchLeadLocal = useCallback((fields: Partial<WorkspaceLead>) => {
+    setLead(prev => ({ ...prev, ...fields }))
+  }, [])
+
   const updateLeadField = useCallback(async (fields: Record<string, unknown>) => {
     setIsSaving(true)
     setLead(prev => ({ ...prev, ...fields }))
@@ -308,7 +315,7 @@ export default function WorkspaceClient(props: WorkspaceClientProps) {
     deals: props.deals, comps: props.comps, aiSummary: props.aiSummary,
     acquisition, activeTab, setActiveTab,
     refreshNotes, refreshDocuments, refreshContacts,
-    addNote, updateLeadField, isSaving,
+    addNote, updateLeadField, patchLeadLocal, isSaving,
     onEnrich, onDeepEnrich, enriching, deepEnriching, enrichMsg, deepEnrichMsg,
     leadTypes, verticals,
   }
@@ -512,6 +519,7 @@ export default function WorkspaceClient(props: WorkspaceClientProps) {
           <div style={{ overflowY: 'auto', padding: '18px 20px' }}>
             {activeTab === 'overview'   && <OverviewTab />}
             {activeTab === 'people'     && <PeopleTab />}
+            {activeTab === 'contact'    && <ContactIntelligenceTab />}
             {activeTab === 'analyze'    && <AnalyzeTab />}
             {activeTab === 'offer'      && <OfferTab />}
             {activeTab === 'documents'  && <WorkspaceDocsTab />}

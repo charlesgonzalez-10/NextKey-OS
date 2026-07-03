@@ -14,6 +14,7 @@ export type ModuleName =
   | 'mortgage'    // L2 — loan balance/lender info
   | 'tax'         // L2 — tax assessment/annual taxes
   | 'foreclosure' // L2 — foreclosure status, case, auction date
+  | 'skiptrace'   // L2 — owner contact info (phones/emails) from skip trace provider
   | 'mls'         // L3 — listing status/price/DOM/agent
   | 'rental'      // L3 — Rentcast rent estimate
   | 'comps'       // L3 — comparable sales
@@ -69,6 +70,12 @@ export const REFRESH_TIERS: Record<ModuleName, TierConfig> = {
     ttlDays:      30,
     description:  'Foreclosure type, case #, auction date — changes frequently during active case',
     snapshotKeys: ['foreclosure_type', 'foreclosure_amount', 'auction_date', 'file_date', 'is_pre_foreclosure', 'is_foreclosure'],
+  },
+  skiptrace: {
+    level:        2,
+    ttlDays:      90,
+    description:  'Owner contact info (phones/emails) from skip trace provider — stable but worth refreshing quarterly',
+    snapshotKeys: ['phone_1', 'phone_2', 'phone_3', 'phone_4', 'phone_5'],
   },
 
   // ── Level 3: Market data ──────────────────────────────────────────────────

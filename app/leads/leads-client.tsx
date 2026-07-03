@@ -998,6 +998,8 @@ export default function LeadsClient({ initialStats }: { initialStats: Stats }) {
   const [selected, setSelected]     = useState<Set<string>>(new Set())
   const [recordType, setRecordType] = useState<RecordType>('all')
   const [workflowTab, setWorkflowTab] = useState<WorkflowTab>('all')
+  const [pipelineFilter, setPipelineFilter] = useState<string>('all')
+  const [pipelines, setPipelines] = useState<{ slug: string; name: string; color: string }[]>([])
   const [viewMode, setViewMode]       = useState<ViewMode>('table')
   const [sortBy, setSortBy]         = useState<string>(() => getInitialViewFromDefault()?.sortBy  ?? 'file_date')
   const [sortDir, setSortDir]       = useState<'desc' | 'asc'>(() => (getInitialViewFromDefault()?.sortDir as 'asc' | 'desc') ?? 'desc')
@@ -1016,6 +1018,12 @@ export default function LeadsClient({ initialStats }: { initialStats: Stats }) {
   const [deleteConfirm, setDeleteConfirm] = useState(false)
   const [deleting, setDeleting]           = useState(false)
   const [bulkStaging, setBulkStaging]     = useState(false)
+  const [bulkPipelining, setBulkPipelining] = useState(false)
+  const [bulkFollowUp, setBulkFollowUp]   = useState('')
+  const [bulkFollowUpSaving, setBulkFollowUpSaving] = useState(false)
+  const [bulkSkipTracing, setBulkSkipTracing]   = useState(false)
+  const [skipTracePreview, setSkipTracePreview] = useState<{ would_trace: number; already_fresh: number; estimated_credits: number } | null>(null)
+  const [showSkipTraceConfirm, setShowSkipTraceConfirm] = useState(false)
   const [listError, setListError]         = useState<string | null>(null)
 
   // Offer / note modals
@@ -1035,9 +1043,11 @@ export default function LeadsClient({ initialStats }: { initialStats: Stats }) {
   const fetchLeads = useCallback(async (
     filters: DrawerFilters, search: string, p: number,
     rt: RecordType = recordType, wt: WorkflowTab = workflowTab,
+    pf: string = pipelineFilter,
   ) => {
     setLoading(true)
     const params = buildFetchParams(search, filters, p, rt, sortBy, sortDir, wt)
+    if (pf && pf !== 'all') params.set('acquisition_pipeline', pf)
     try {
       const res  = await fetch(`/api/properties?${params}`)
       const data = await res.json()
@@ -1047,9 +1057,16 @@ export default function LeadsClient({ initialStats }: { initialStats: Stats }) {
       setPages(data.pages || 1)
     } catch { setListError('Failed to load leads — check your connection and try again.') }
     finally { setLoading(false) }
-  }, [sortBy, sortDir, recordType])
+  }, [sortBy, sortDir, recordType, pipelineFilter])
 
-  useEffect(() => { fetchLeads(appliedFilters, searchInput, 1, recordType, workflowTab) }, [sortBy, sortDir, recordType, workflowTab]) // eslint-disable-line
+  useEffect(() => { fetchLeads(appliedFilters, searchInput, 1, recordType, workflowTab, pipelineFilter) }, [sortBy, sortDir, recordType, workflowTab]) // eslint-disable-line
+
+  useEffect(() => {
+    fetch('/api/acquisition/pipelines')
+      .then(r => r.ok ? r.json() : { pipelines: [] })
+      .then(d => setPipelines((d.pipelines ?? []).map((p: { slug: string; name: string; color: string }) => ({ slug: p.slug, name: p.name, color: p.color }))))
+      .catch(() => {})
+  }, [])
 
   const handleSearchChange = (value: string) => {
     setSearchInput(value)
@@ -1156,6 +1173,40 @@ export default function LeadsClient({ initialStats }: { initialStats: Stats }) {
     setBulkStaging(false)
   }
 
+  const bulkAssignPipeline = async (pipeline: string) => {
+    if (selected.size === 0) return
+    setBulkPipelining(true)
+    const results = await Promise.all(Array.from(selected).map(id =>
+      fetch(`/api/leads/${id}/stage`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acquisition_pipeline: pipeline || null }),
+      }).then(r => ({ id, ok: r.ok })).catch(() => ({ id, ok: false }))
+    ))
+    const succeeded = new Set(results.filter(r => r.ok).map(r => r.id))
+    if (succeeded.size > 0) setLeads(prev => prev.map(l => succeeded.has(l.id) ? { ...l, acquisition_pipeline: pipeline || null } : l))
+    setSelected(new Set())
+    setBulkPipelining(false)
+  }
+
+  const bulkSetFollowUp = async (dateStr: string) => {
+    if (!dateStr || selected.size === 0) return
+    setBulkFollowUpSaving(true)
+    const follow_up_at = new Date(dateStr).toISOString()
+    const results = await Promise.all(Array.from(selected).map(id =>
+      fetch(`/api/leads/${id}/stage`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ follow_up_at }),
+      }).then(r => ({ id, ok: r.ok })).catch(() => ({ id, ok: false }))
+    ))
+    const succeeded = new Set(results.filter(r => r.ok).map(r => r.id))
+    if (succeeded.size > 0) setLeads(prev => prev.map(l => succeeded.has(l.id) ? { ...l, follow_up_at } : l))
+    setBulkFollowUp('')
+    setSelected(new Set())
+    setBulkFollowUpSaving(false)
+  }
+
   const deleteSingle = async (id: string) => {
     await fetch(`/api/leads/${id}`, { method: 'DELETE' })
     setLeads(prev => prev.filter(l => l.id !== id))
@@ -1207,6 +1258,41 @@ export default function LeadsClient({ initialStats }: { initialStats: Stats }) {
     setSelected(new Set())
   }
 
+  // ── Bulk skip trace ───────────────────────────────────────────────────────
+
+  const bulkSkipTracePreview = async () => {
+    if (selected.size === 0) return
+    const propertyIds = Array.from(selected)
+    try {
+      const res  = await fetch('/api/leads/bulk-skiptrace?preview=true', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body:   JSON.stringify({ propertyIds }),
+      })
+      const data = await res.json()
+      if (data.error === 'NO_CREDENTIALS') {
+        alert('Skip trace is not configured. Add BATCHDATA_API_KEY to environment variables.')
+        return
+      }
+      setSkipTracePreview(data)
+      setShowSkipTraceConfirm(true)
+    } catch {
+      alert('Failed to preview skip trace.')
+    }
+  }
+
+  const bulkSkipTraceRun = async () => {
+    const propertyIds = Array.from(selected)
+    setBulkSkipTracing(true); setShowSkipTraceConfirm(false)
+    try {
+      await fetch('/api/leads/bulk-skiptrace', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body:   JSON.stringify({ propertyIds }),
+      })
+    } finally {
+      setBulkSkipTracing(false); setSkipTracePreview(null)
+    }
+  }
+
   const allSelected   = leads.length > 0 && selected.size === leads.length
   const activeFilters = countActiveFilters(appliedFilters)
   const isCustomCols  = colOrder.join(',') !== DEFAULT_COLUMNS.join(',')
@@ -1236,6 +1322,15 @@ export default function LeadsClient({ initialStats }: { initialStats: Stats }) {
               </span>
             </div>
           </div>
+          <button
+            onClick={() => router.push('/leads/import')}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold shrink-0 hover:opacity-80 transition-opacity"
+            style={{ backgroundColor: 'rgba(201,168,76,0.12)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.3)' }}>
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+            </svg>
+            Import
+          </button>
         </div>
 
         {/* Search bar */}
@@ -1332,6 +1427,38 @@ export default function LeadsClient({ initialStats }: { initialStats: Stats }) {
               )
             })}
           </div>
+
+          {/* Acquisition pipeline filter */}
+          {pipelines.length > 0 && (
+            <div className="flex items-center gap-1 flex-wrap">
+              <span className="text-[10px] font-semibold uppercase tracking-wide mr-1" style={{ color: 'var(--c-text-3)' }}>Pipeline:</span>
+              <button
+                onClick={() => { setPipelineFilter('all'); fetchLeads(appliedFilters, searchInput, 1, recordType, workflowTab, 'all') }}
+                className="text-[11px] font-bold px-3 py-1 rounded-full transition-all whitespace-nowrap"
+                style={{
+                  backgroundColor: pipelineFilter === 'all' ? 'var(--c-primary)' : 'var(--c-hover)',
+                  color:           pipelineFilter === 'all' ? '#C9A84C' : 'var(--c-text-2)',
+                  border:          `1px solid ${pipelineFilter === 'all' ? 'var(--c-primary)' : 'var(--c-border)'}`,
+                }}>
+                All
+              </button>
+              {pipelines.map(pl => {
+                const active = pipelineFilter === pl.slug
+                return (
+                  <button key={pl.slug}
+                    onClick={() => { setPipelineFilter(pl.slug); fetchLeads(appliedFilters, searchInput, 1, recordType, workflowTab, pl.slug) }}
+                    className="text-[11px] font-bold px-3 py-1 rounded-full transition-all whitespace-nowrap"
+                    style={{
+                      backgroundColor: active ? (pl.color || '#7B8FD4') : 'var(--c-hover)',
+                      color:           active ? '#fff' : 'var(--c-text-2)',
+                      border:          `1px solid ${active ? (pl.color || '#7B8FD4') : 'var(--c-border)'}`,
+                    }}>
+                    {pl.name}
+                  </button>
+                )
+              })}
+            </div>
+          )}
         </div>
       </div>
 
@@ -1818,6 +1945,34 @@ export default function LeadsClient({ initialStats }: { initialStats: Stats }) {
             <option value="dead">Dead</option>
           </select>
 
+          {/* Assign Pipeline */}
+          {pipelines.length > 0 && (
+            <select
+              disabled={bulkPipelining}
+              onChange={e => { if (e.target.value !== '_') { bulkAssignPipeline(e.target.value); e.target.value = '_' } }}
+              className="shrink-0 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg cursor-pointer"
+              style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+              <option value="_">{bulkPipelining ? 'Assigning…' : 'Assign Pipeline ▾'}</option>
+              {pipelines.map(pl => <option key={pl.slug} value={pl.slug}>{pl.name}</option>)}
+              <option value="">Remove Pipeline</option>
+            </select>
+          )}
+
+          {/* Follow-up date */}
+          <div className="shrink-0 flex items-center gap-1.5">
+            <span className="text-[10px] font-semibold" style={{ color: 'var(--c-text-3)' }}>Follow-up:</span>
+            <input type="date" value={bulkFollowUp} onChange={e => setBulkFollowUp(e.target.value)}
+              className="text-[11px] rounded-lg px-2 py-1.5"
+              style={{ backgroundColor: 'var(--c-hover)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }} />
+            {bulkFollowUp && (
+              <button onClick={() => bulkSetFollowUp(bulkFollowUp)} disabled={bulkFollowUpSaving}
+                className="text-[11px] font-bold px-2.5 py-1.5 rounded-lg hover:opacity-80"
+                style={{ backgroundColor: 'rgba(167,139,250,0.15)', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.4)' }}>
+                {bulkFollowUpSaving ? '…' : 'Set'}
+              </button>
+            )}
+          </div>
+
           {/* Generate Offer */}
           <button
             onClick={() => {
@@ -1842,6 +1997,25 @@ export default function LeadsClient({ initialStats }: { initialStats: Stats }) {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
             </svg>
             Export
+          </button>
+
+          {/* Skip Trace */}
+          <button
+            onClick={bulkSkipTracePreview}
+            disabled={bulkSkipTracing}
+            className="shrink-0 flex items-center gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-lg hover:opacity-80"
+            style={{ backgroundColor: 'rgba(201,168,76,0.12)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.35)' }}>
+            {bulkSkipTracing ? (
+              '⟳ Tracing…'
+            ) : (
+              <>
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                </svg>
+                Skip Trace
+              </>
+            )}
           </button>
 
           {/* Block */}
@@ -1889,6 +2063,60 @@ export default function LeadsClient({ initialStats }: { initialStats: Stats }) {
             style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
             ✕ Clear
           </button>
+        </div>
+      )}
+
+      {/* ── Skip Trace confirmation modal ─────────────────────────────────────── */}
+      {showSkipTraceConfirm && skipTracePreview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ backgroundColor: 'rgba(0,0,0,0.6)' }}>
+          <div style={{
+            background: '#0a1729', border: '1px solid #1a3050', borderRadius: 12,
+            padding: 24, maxWidth: 380, width: '100%', margin: '0 16px',
+          }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#e2e8f0', marginBottom: 12 }}>
+              Confirm Bulk Skip Trace
+            </div>
+            <div style={{ fontSize: 12, color: '#4a6a9a', marginBottom: 16, lineHeight: 1.6 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span>Properties selected</span>
+                <span style={{ color: '#e2e8f0', fontWeight: 600 }}>{selected.size}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span>Already fresh (will skip)</span>
+                <span style={{ color: '#4CAF9A', fontWeight: 600 }}>{skipTracePreview.already_fresh}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span>Will be traced</span>
+                <span style={{ color: '#C9A84C', fontWeight: 600 }}>{skipTracePreview.would_trace}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 8, borderTop: '1px solid #1a3050', marginTop: 8 }}>
+                <span>Estimated credits</span>
+                <span style={{ color: '#e2e8f0', fontWeight: 700 }}>{skipTracePreview.estimated_credits}</span>
+              </div>
+            </div>
+            <div style={{ fontSize: 11, color: '#4a6a9a', marginBottom: 16 }}>
+              Properties traced within the last 90 days are skipped automatically.
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={bulkSkipTraceRun}
+                style={{
+                  flex: 1, padding: '8px 0', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                  background: '#C9A84C', color: '#0A1F44', border: 'none', cursor: 'pointer',
+                }}>
+                Run Skip Trace
+              </button>
+              <button
+                onClick={() => { setShowSkipTraceConfirm(false); setSkipTracePreview(null) }}
+                style={{
+                  flex: 1, padding: '8px 0', borderRadius: 8, fontSize: 12, fontWeight: 600,
+                  background: 'transparent', color: '#4a6a9a', border: '1px solid #1a3050', cursor: 'pointer',
+                }}>
+                Cancel
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

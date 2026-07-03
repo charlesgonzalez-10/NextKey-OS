@@ -34,6 +34,8 @@ export const WIDGET_IDS = [
   'monthly_kpis',
   'lead_type_breakdown',
   'quick_actions',
+  'acquisition_metrics',
+  'data_source_metrics',
 ] as const
 
 export type WidgetId = typeof WIDGET_IDS[number]
@@ -51,22 +53,26 @@ export const WIDGET_LABELS: Record<WidgetId, string> = {
   monthly_kpis:         'Monthly KPIs',
   lead_type_breakdown:  'Lead Type Breakdown',
   quick_actions:        'Quick Actions',
+  acquisition_metrics:  'Acquisition Metrics',
+  data_source_metrics:  'Data Source Intelligence',
 }
 
 // Default layout presets
 const ACQUISITION_LAYOUT: WidgetConfig[] = [
   { id: 'morning_briefing',    size: 'full', visible: true,  order: 0 },
   { id: 'business_snapshot',   size: 'full', visible: true,  order: 1 },
-  { id: 'priorities',          size: 'md',   visible: true,  order: 2 },
-  { id: 'follow_ups',          size: 'md',   visible: true,  order: 3 },
-  { id: 'opportunity_leads',   size: 'lg',   visible: true,  order: 4 },
-  { id: 'quick_actions',       size: 'sm',   visible: true,  order: 5 },
-  { id: 'lead_type_breakdown', size: 'md',   visible: true,  order: 6 },
-  { id: 'pipeline_funnel',     size: 'md',   visible: true,  order: 7 },
-  { id: 'active_deals',        size: 'md',   visible: true,  order: 8 },
-  { id: 'offers_contracts',    size: 'md',   visible: true,  order: 9 },
-  { id: 'recent_activity',     size: 'md',   visible: true,  order: 10 },
-  { id: 'monthly_kpis',        size: 'full', visible: true,  order: 11 },
+  { id: 'acquisition_metrics',  size: 'full', visible: true,  order: 2 },
+  { id: 'data_source_metrics',  size: 'full', visible: true,  order: 3 },
+  { id: 'priorities',           size: 'md',   visible: true,  order: 4 },
+  { id: 'follow_ups',           size: 'md',   visible: true,  order: 5 },
+  { id: 'opportunity_leads',    size: 'lg',   visible: true,  order: 6 },
+  { id: 'quick_actions',        size: 'sm',   visible: true,  order: 7 },
+  { id: 'lead_type_breakdown',  size: 'md',   visible: true,  order: 8 },
+  { id: 'pipeline_funnel',      size: 'md',   visible: true,  order: 9 },
+  { id: 'active_deals',         size: 'md',   visible: true,  order: 10 },
+  { id: 'offers_contracts',     size: 'md',   visible: true,  order: 11 },
+  { id: 'recent_activity',      size: 'md',   visible: true,  order: 12 },
+  { id: 'monthly_kpis',         size: 'full', visible: true,  order: 13 },
 ]
 
 const OPERATIONS_LAYOUT: WidgetConfig[] = [
@@ -82,6 +88,8 @@ const OPERATIONS_LAYOUT: WidgetConfig[] = [
   { id: 'pipeline_funnel',     size: 'md',   visible: false, order: 9 },
   { id: 'lead_type_breakdown', size: 'md',   visible: false, order: 10 },
   { id: 'quick_actions',       size: 'sm',   visible: false, order: 11 },
+  { id: 'acquisition_metrics', size: 'full', visible: false, order: 12 },
+  { id: 'data_source_metrics', size: 'full', visible: false, order: 13 },
 ]
 
 const EXECUTIVE_LAYOUT: WidgetConfig[] = [
@@ -97,6 +105,8 @@ const EXECUTIVE_LAYOUT: WidgetConfig[] = [
   { id: 'opportunity_leads',   size: 'lg',   visible: false, order: 9 },
   { id: 'recent_activity',     size: 'md',   visible: false, order: 10 },
   { id: 'quick_actions',       size: 'sm',   visible: false, order: 11 },
+  { id: 'acquisition_metrics', size: 'full', visible: false, order: 12 },
+  { id: 'data_source_metrics', size: 'full', visible: false, order: 13 },
 ]
 
 const FOCUS_LAYOUT: WidgetConfig[] = [
@@ -112,6 +122,8 @@ const FOCUS_LAYOUT: WidgetConfig[] = [
   { id: 'recent_activity',     size: 'md',   visible: false, order: 9 },
   { id: 'monthly_kpis',        size: 'full', visible: false, order: 10 },
   { id: 'quick_actions',       size: 'sm',   visible: false, order: 11 },
+  { id: 'acquisition_metrics', size: 'full', visible: false, order: 12 },
+  { id: 'data_source_metrics', size: 'full', visible: false, order: 13 },
 ]
 
 export const DEFAULT_LAYOUTS: Record<LayoutMode, WidgetConfig[]> = {

@@ -13,10 +13,12 @@
  */
 
 import type { PropertySourceResult } from './types'
-import { searchByAddress as browardAddressSearch, searchByFolio as browardFolioSearch } from './broward-pa'
-import { searchByAddress as palmBeachAddressSearch, searchByFolio as palmBeachFolioSearch } from './palm-beach-pa'
-import { searchByAddress as martinAddressSearch, searchByFolio as martinFolioSearch } from './martin-pa'
-import { searchByAddress as stLucieAddressSearch, searchByFolio as stLucieFolioSearch } from './st-lucie-pa'
+import { searchByAddress as browardAddressSearch,    searchByFolio as browardFolioSearch    } from './broward-pa'
+import { searchByAddress as palmBeachAddressSearch,  searchByFolio as palmBeachFolioSearch  } from './palm-beach-pa'
+import { searchByAddress as martinAddressSearch,     searchByFolio as martinFolioSearch     } from './martin-pa'
+import { searchByAddress as stLucieAddressSearch,    searchByFolio as stLucieFolioSearch    } from './st-lucie-pa'
+import { searchByAddress as miamiDadeAddressSearch,  searchByFolio as miamiDadeFolioSearch  } from './miami-dade-pa'
+import { searchByAddress as leeAddressSearch,         searchByFolio as leeFolioSearch         } from './lee-pa'
 
 // ─── County → ordered list of address-search functions ───────────────────────
 
@@ -24,19 +26,27 @@ type AddressSearchFn = (address: string, city?: string) => Promise<PropertySourc
 type FolioSearchFn   = (folio: string) => Promise<PropertySourceResult | null>
 
 const COUNTY_ADDRESS_SOURCES: Record<string, AddressSearchFn[]> = {
+  'miami-dade': [miamiDadeAddressSearch],
   'broward':    [browardAddressSearch],
   'palm-beach': [palmBeachAddressSearch],
-  'miami-dade': [],   // handled by existing searchMiamiDade() in property-search.ts
   'martin':     [martinAddressSearch],
   'st-lucie':   [stLucieAddressSearch],
+  'lee':        [leeAddressSearch],
 }
 
 const COUNTY_FOLIO_SOURCES: Record<string, FolioSearchFn[]> = {
+  'miami-dade': [miamiDadeFolioSearch],
   'broward':    [browardFolioSearch],
   'palm-beach': [palmBeachFolioSearch],
-  'miami-dade': [],
   'martin':     [martinFolioSearch],
   'st-lucie':   [stLucieFolioSearch],
+  'lee':        [leeFolioSearch],
+}
+
+/** True if a normalized county slug has at least one registered source. */
+export function isCountySupported(normalizedCounty: string): boolean {
+  return (COUNTY_ADDRESS_SOURCES[normalizedCounty]?.length ?? 0) > 0
+    || (COUNTY_FOLIO_SOURCES[normalizedCounty]?.length ?? 0) > 0
 }
 
 // ─── Exported orchestrators ───────────────────────────────────────────────────

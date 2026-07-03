@@ -53,7 +53,13 @@ export async function PATCH(
   if ('offer_sent'    in body) update.offer_sent    = Boolean(body.offer_sent)
   if ('offer_pct'     in body) update.offer_pct     = body.offer_pct     ?? null
   if ('offer_amount'  in body) update.offer_amount  = body.offer_amount  ?? null
-  if ('blocked'       in body) update.blocked       = Boolean(body.blocked)
+  if ('blocked'             in body) update.blocked             = Boolean(body.blocked)
+  // Acquisition Operations fields
+  if ('acquisition_pipeline' in body) update.acquisition_pipeline = body.acquisition_pipeline ?? null
+  if ('surplus_status'       in body) update.surplus_status       = body.surplus_status       ?? null
+  if ('follow_up_at'         in body) update.follow_up_at         = body.follow_up_at         ?? null
+  if ('last_contact_at'      in body) update.last_contact_at      = body.last_contact_at      ?? null
+  if ('assigned_to'          in body) update.assigned_to          = body.assigned_to          ?? null
 
   if (Object.keys(update).length <= 1) {  // only updated_at
     return NextResponse.json({ error: 'No valid fields to update' }, { status: 400 })

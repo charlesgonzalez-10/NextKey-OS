@@ -6,6 +6,7 @@ import { useWorkspace } from '@/app/leads/[id]/workspace-client'
 import { fmtDate, fmtDateTime, fmtMoneyFull, STAGE_META } from '@/lib/acquisitionEngine'
 
 const PropertyMapCard = dynamic(() => import('@/components/PropertyMapCard'), { ssr: false })
+const CallingPanel    = dynamic(() => import('@/components/workspace/tabs/CallingPanel'), { ssr: false })
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -814,6 +815,24 @@ export default function OverviewTab() {
             <KV k="SMS"   v={communicationStatus.smsStatus  !== 'not_sent'   ? 'Sent' : '—'} vColor="#4a6a9a" />
             <KV k="Email" v={communicationStatus.emailStatus !== 'not_sent'  ? 'Sent' : '—'} vColor="#4a6a9a" />
           </Card>
+
+          {/* Surplus Funds banner */}
+          {lead.surplus_funds_amount && (
+            <Card style={{ border: '1px solid rgba(76,175,154,0.4)', background: 'rgba(76,175,154,0.06)' }}>
+              <CardTitle><span style={{ color: '#4CAF9A' }}>Surplus Funds</span></CardTitle>
+              <KV k="Surplus Amount" v={`$${lead.surplus_funds_amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} vColor="#4CAF9A" />
+              <div style={{ fontSize: 10, color: 'var(--c-text-3)', marginTop: 4 }}>
+                Unclaimed funds held by the county — owed to the property owner.
+              </div>
+            </Card>
+          )}
+
+          {/* Calling workflow — shown for acquisition leads */}
+          {lead.acquisition_pipeline && (
+            <Card>
+              <CallingPanel />
+            </Card>
+          )}
 
           {/* Valuation */}
           <Card>

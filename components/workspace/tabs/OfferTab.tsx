@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import { useWorkspace } from '@/app/leads/[id]/workspace-client'
 import { fmtMoneyFull, offerPctCalc } from '@/lib/acquisitionEngine'
 
@@ -25,13 +25,36 @@ function KV({ k, v, vColor }: { k: string; v: React.ReactNode; vColor?: string }
 
 type BaseValueType = 'market' | 'arv' | 'custom'
 
+interface OfferRow {
+  id: string
+  purchase_price: number
+  earnest_money?: number | null
+  financing_type?: string | null
+  closing_days?: number | null
+  inspection_days?: number | null
+  deposit_days?: number | null
+  offer_pct?: number | null
+  base_value_type?: string | null
+  base_value?: number | null
+  offer_type?: string | null
+  notes?: string | null
+  status?: string | null
+}
+
 export default function OfferTab() {
   const { lead, acquisition, updateLeadField, setActiveTab } = useWorkspace()
   const { offerStatus } = acquisition
 
-  // Which base value to use
-  const [baseType, setBaseType]   = useState<BaseValueType>('market')
-  const [customBase, setCustomBase] = useState('')
+  const propertyId = lead.property_id ?? lead.id
+  const leadUuid   = lead.lead_id ?? null
+
+  // Persisted offer
+  const [offerId,    setOfferId]    = useState<string | null>(null)
+  const [offerLoaded, setOfferLoaded] = useState(false)
+
+  // Form state
+  const [baseType,    setBaseType]    = useState<BaseValueType>('market')
+  const [customBase,  setCustomBase]  = useState('')
   const [selectedPct, setSelectedPct] = useState<number>(lead.offer_pct ?? 65)
   const [customPct,   setCustomPct]   = useState('')
   const [earnest,     setEarnest]     = useState('1000')
@@ -40,7 +63,38 @@ export default function OfferTab() {
   const [financing,   setFinancing]   = useState('Cash')
   const [showRevise,  setShowRevise]  = useState(!offerStatus.hasOffer)
   const [saving,      setSaving]      = useState(false)
+  const [saveError,   setSaveError]   = useState<string | null>(null)
   const [sendingSoon, setSendingSoon] = useState(false)
+
+  const initialized = useRef(false)
+
+  // Load latest offer on mount
+  useEffect(() => {
+    if (initialized.current) return
+    initialized.current = true
+
+    fetch(`/api/offers?property_id=${propertyId}&latest=true`)
+      .then(r => r.ok ? r.json() : null)
+      .then((d: { offer: OfferRow | null } | null) => {
+        const offer = d?.offer
+        if (offer) {
+          setOfferId(offer.id)
+          setSelectedPct(offer.offer_pct ?? 65)
+          setEarnest(String(offer.earnest_money ?? 1000))
+          setInspection(String(offer.inspection_days ?? 10))
+          setClosingDays(String(offer.closing_days ?? 30))
+          setFinancing(offer.financing_type ?? 'Cash')
+          if (offer.base_value_type && offer.base_value_type !== 'market') {
+            setBaseType(offer.base_value_type as BaseValueType)
+            if (offer.base_value_type === 'custom' && offer.base_value) {
+              setCustomBase(String(offer.base_value))
+            }
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => setOfferLoaded(true))
+  }, [propertyId])
 
   const mv = lead.estimated_value ?? 0
 
@@ -50,25 +104,75 @@ export default function OfferTab() {
     return 0
   }, [baseType, mv, customBase])
 
-  const effectivePct = customPct ? parseFloat(customPct) || selectedPct : selectedPct
+  const effectivePct    = customPct ? parseFloat(customPct) || selectedPct : selectedPct
   const calculatedOffer = baseValue > 0 ? offerPctCalc(baseValue, effectivePct) : 0
 
   const handleSaveOffer = async () => {
     if (calculatedOffer <= 0) return
     setSaving(true)
-    await updateLeadField({
-      offer_amount:   calculatedOffer,
-      offer_pct:      effectivePct,
-      pipeline_stage: 'offer',
-    })
-    setSaving(false)
-    setShowRevise(false)
+    setSaveError(null)
+
+    const body = {
+      property_id:     propertyId,
+      lead_id:         leadUuid,
+      purchase_price:  calculatedOffer,
+      earnest_money:   parseFloat(earnest)    || 1000,
+      inspection_days: parseInt(inspection)   || 10,
+      closing_days:    parseInt(closingDays)  || 30,
+      financing_type:  financing,
+      base_value_type: baseType,
+      base_value:      baseValue > 0 ? baseValue : null,
+      offer_pct:       effectivePct,
+      offer_type:      'wholesale',
+    }
+
+    try {
+      let saved: OfferRow | null = null
+
+      if (offerId) {
+        const res = await fetch(`/api/offers/${offerId}`, {
+          method:  'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(body),
+        })
+        const d = await res.json()
+        if (!res.ok) throw new Error(d.error ?? 'Failed to update offer')
+        saved = d.offer ?? null
+      } else {
+        const res = await fetch('/api/offers', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(body),
+        })
+        const d = await res.json()
+        if (!res.ok) throw new Error(d.error ?? 'Failed to save offer')
+        saved = d.offer ?? null
+        if (saved?.id) setOfferId(saved.id)
+      }
+
+      // Always keep leads row in sync regardless of offers table state
+      await updateLeadField({
+        offer_amount:   calculatedOffer,
+        offer_pct:      effectivePct,
+        pipeline_stage: 'offer',
+      })
+
+      setShowRevise(false)
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to save offer')
+    } finally {
+      setSaving(false)
+    }
   }
 
   const handleMarkSent = async () => {
     setSendingSoon(true)
     await updateLeadField({ offer_sent: true })
     setSendingSoon(false)
+  }
+
+  if (!offerLoaded) {
+    return <div style={{ height: 80, background: '#0d1b2e', borderRadius: 7, animation: 'pulse 1.5s ease-in-out infinite' }} />
   }
 
   return (
@@ -234,6 +338,13 @@ export default function OfferTab() {
           </div>
 
           {/* Actions */}
+          {saveError && (
+            <div style={{ background: '#1a0a0a', border: '1px solid #7f1d1d', borderRadius: 5, padding: '7px 10px', marginBottom: 8, fontSize: 11, color: '#f87171' }}>
+              {saveError.includes('does not exist') || saveError.includes('relation')
+                ? '⚠ Offers table missing — run offers_table.sql in Supabase first. Offer terms are saved locally.'
+                : `⚠ ${saveError}`}
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 7 }}>
             <button
               onClick={handleSaveOffer}

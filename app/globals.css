@@ -11,30 +11,36 @@
 
 /* ── OS-adaptive theme variables ──────────────────────────────────────────── */
 :root {
-  --c-primary:   #0A1F44;
-  --c-gold:      #C9A84C;
-  --c-bg:        #F0F2F5;
-  --c-card:      #ffffff;
-  --c-card-alt:  #F8F7F4;
-  --c-border:    #f3f4f6;
-  --c-text-2:    #6b7280;
-  --c-text-3:    #9ca3af;
-  --c-hover:     #f9fafb;
-  --c-input-bg:  #ffffff;
+  --c-primary:        #0A1F44;
+  --c-gold:           #C9A84C;
+  --c-bg:             #F0F2F5;
+  --c-card:           #ffffff;
+  --c-card-alt:       #F8F7F4;
+  --c-border:         #f3f4f6;
+  --c-border-strong:  #d1d5db;
+  --c-text-1:         #374151;
+  --c-text-2:         #6b7280;
+  --c-text-3:         #9ca3af;
+  --c-hover:          #f9fafb;
+  --c-input-bg:       #ffffff;
+  --c-input-border:   #d1d5db;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --c-primary:   #ffffff;
-    --c-gold:      #C9A84C;
-    --c-bg:        #060F1E;
-    --c-card:      #081530;
-    --c-card-alt:  #0d1e3a;
-    --c-border:    rgba(255,255,255,0.08);
-    --c-text-2:    rgba(255,255,255,0.45);
-    --c-text-3:    rgba(255,255,255,0.28);
-    --c-hover:     rgba(255,255,255,0.04);
-    --c-input-bg:  rgba(255,255,255,0.05);
+    --c-primary:        #ffffff;
+    --c-gold:           #C9A84C;
+    --c-bg:             #060F1E;
+    --c-card:           #081530;
+    --c-card-alt:       #0d1e3a;
+    --c-border:         rgba(255,255,255,0.08);
+    --c-border-strong:  rgba(255,255,255,0.18);
+    --c-text-1:         rgba(255,255,255,0.70);
+    --c-text-2:         rgba(255,255,255,0.45);
+    --c-text-3:         rgba(255,255,255,0.28);
+    --c-hover:          rgba(255,255,255,0.04);
+    --c-input-bg:       rgba(255,255,255,0.06);
+    --c-input-border:   rgba(255,255,255,0.20);
   }
 }
 
@@ -45,4 +51,11 @@ body {
   background: var(--c-bg);
   color: var(--c-primary);
   height: 100%;
+}
+
+/* Ensure placeholder text always meets minimum contrast */
+input::placeholder,
+textarea::placeholder {
+  color: var(--c-text-1);
+  opacity: 1;
 }

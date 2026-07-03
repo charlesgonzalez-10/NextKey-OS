@@ -17,6 +17,8 @@
 
 import { createClient } from '@supabase/supabase-js'
 import { detectEntityType } from '@/lib/scrapers/utils'
+import { markModuleRefreshed } from '@/lib/propertyService'
+import { recordFieldSources, logDSOERequest } from '@/lib/dsoe'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -375,7 +377,7 @@ async function ingestProperty(
   // ── Dedup by folio_number ──────────────────────────────────────────────────
   const { data: existing } = await supabase
     .from('properties')
-    .select('id, is_pre_foreclosure, is_foreclosure, is_auction')
+    .select('id, is_pre_foreclosure, is_foreclosure, is_auction, foreclosure_status_override')
     .eq('folio_number', apn)
     .maybeSingle()
 
@@ -383,12 +385,19 @@ async function ingestProperty(
 
   if (existing) {
     // Already in DB. Update distress flags and financials.
+    // Never overwrite foreclosure_status_override — that is a manual operational field.
+    // If the REAPI-derived status changes while an override is active, flag it.
+    const prevREAPI = (existing.is_foreclosure || existing.is_auction) ? 'Active' : existing.is_pre_foreclosure ? 'Pending' : null
+    const newREAPI  = (payload.is_foreclosure  || payload.is_auction)  ? 'Active' : payload.is_pre_foreclosure  ? 'Pending' : null
+    const reapiChanged = !!(existing.foreclosure_status_override && prevREAPI !== newREAPI)
+
     const { error: updErr } = await supabase
       .from('properties')
       .update({
         is_pre_foreclosure: payload.is_pre_foreclosure || existing.is_pre_foreclosure,
         is_foreclosure:     payload.is_foreclosure     || existing.is_foreclosure,
         is_auction:         payload.is_auction         || existing.is_auction,
+        ...(reapiChanged ? { foreclosure_reapi_changed: true } : {}),
         file_date:          payload.file_date,
         plaintiff:          payload.plaintiff,
         lender_name:        payload.lender_name,
@@ -424,6 +433,48 @@ async function ingestProperty(
     }
     propertyId = newProp.id
   }
+
+  // ── Seed property_freshness ────────────────────────────────────────────────
+  // Marks modules as fresh so the first workspace open doesn't trigger
+  // redundant Rentcast or REAPI calls for data we just ingested.
+  void Promise.all([
+    markModuleRefreshed(propertyId, 'foreclosure', 'reapi-ingest'),
+    markModuleRefreshed(propertyId, 'valuation',   'reapi-ingest'),
+    markModuleRefreshed(propertyId, 'mortgage',    'reapi-ingest'),
+    markModuleRefreshed(propertyId, 'ownership',   'reapi-ingest'),
+    markModuleRefreshed(propertyId, 'rental',      'reapi-ingest'),
+  ]).catch(() => {})
+
+  // ── Record DSOE field provenance ───────────────────────────────────────────
+  void recordFieldSources(propertyId, {
+    owner_name:      payload.owner_name,
+    folio:           payload.folio_number,
+    beds:            payload.beds,
+    baths:           payload.baths,
+    year_built:      payload.year_built,
+    living_area:     payload.living_area,
+    lot_size:        payload.lot_size,
+    assessed_value:  payload.assessed_value,
+    market_value:    payload.market_value,
+    homestead:       payload.homestead,
+    absentee_owner:  payload.absentee_owner,
+  }, {
+    source:      'reapi',
+    sourceType:  'paid',
+    sourceLabel: 'RealEstateAPI',
+    confidence:  95,
+  })
+  logDSOERequest({
+    propertyId,
+    tier:           3,
+    source:         'reapi',
+    fieldsResolved: 11,
+    cacheHits:      0,
+    countyHits:     0,
+    premiumHits:    11,
+    costCents:      5,
+    durationMs:     0,
+  })
 
   // ── Ensure a leads entry exists ────────────────────────────────────────────
   const { data: existingLead } = await supabase

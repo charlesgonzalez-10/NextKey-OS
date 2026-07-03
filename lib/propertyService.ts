@@ -213,6 +213,11 @@ export async function snapshotBeforeUpdate(
 /**
  * Record a property search event. Atomically increments the counter.
  * Fire-and-forget — never throws, never blocks the response.
+ *
+ * The resulting search_frequency (low / medium / high) is read by the
+ * daily refresh cron (app/api/cron/refresh-saved) to prioritize stale
+ * properties that are actively being worked in the workspace — ensuring
+ * high-frequency properties are refreshed first when the cron has a batch limit.
  */
 export function recordPropertySearch(propertyId: string): void {
   void serviceClient
@@ -369,5 +374,5 @@ export function accumulateMarketData(
   void serviceClient
     .from('market_intelligence_events')
     .insert(events)
-    .then(() => {}, () => {})
+    .then(() => {}, (err) => console.error('[MarketData] insert failed:', err))
 }

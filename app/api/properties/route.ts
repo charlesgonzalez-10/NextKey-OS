@@ -62,9 +62,10 @@ export async function GET(req: NextRequest) {
   const ai_score_min     = p.get('ai_score_min') ? parseInt(p.get('ai_score_min')!, 10) : null
   const lead_types_raw   = p.get('lead_types') || ''
   const lead_types       = lead_types_raw ? lead_types_raw.split(',').filter(Boolean) : []
-  const imported         = p.get('imported')      // 'true' = has imported_to_contact
-  const blocked          = p.get('blocked')        // 'true' = blocked=true
-  const record_type      = p.get('record_type') || ''   // tab filter: lp | probate | auction | tax_deed | divorce
+  const imported              = p.get('imported')            // 'true' = has imported_to_contact
+  const blocked               = p.get('blocked')             // 'true' = blocked=true
+  const record_type           = p.get('record_type') || ''   // tab filter: lp | probate | auction | tax_deed | divorce
+  const acquisition_pipeline  = p.get('acquisition_pipeline') || ''
 
   const beds_min   = p.get('beds_min')   ? parseInt(p.get('beds_min')!, 10)   : null
   const beds_max   = p.get('beds_max')   ? parseInt(p.get('beds_max')!, 10)   : null
@@ -107,6 +108,7 @@ export async function GET(req: NextRequest) {
       is_pre_foreclosure, is_foreclosure, is_auction, is_tax_lien,
       is_probate, is_tax_deed, is_divorce,
       free_clear, high_equity,
+      surplus_funds_amount, last_sale_date,
       folio_number, owner_name, property_address, city, zip,
       owner_state, owner_zip, owner_city, mailing_address, auction_date,
       unit_number, num_units,
@@ -239,7 +241,7 @@ export async function GET(req: NextRequest) {
   if (propIds.length > 0) {
     const { data: leadsData } = await supabase
       .from('leads')
-      .select('property_id, id, status, pipeline_stage, starred, lead_score, ai_score, imported_to_contact, source, notes, call_status, sms_status, email_status, offer_sent, offer_pct, offer_amount, blocked, created_at')
+      .select('property_id, id, status, pipeline_stage, starred, lead_score, ai_score, imported_to_contact, source, notes, call_status, sms_status, email_status, offer_sent, offer_pct, offer_amount, blocked, created_at, acquisition_pipeline, surplus_status, follow_up_at, last_contact_at, assigned_to')
       .in('property_id', propIds)
 
     if (leadsData) {
@@ -266,9 +268,14 @@ export async function GET(req: NextRequest) {
       offer_sent:          lead?.offer_sent          ?? false,
       offer_pct:           lead?.offer_pct           ?? null,
       offer_amount:        lead?.offer_amount        ?? null,
-      blocked:             lead?.blocked             ?? false,
-      lead_added_at:       lead?.created_at          ?? null,
-      is_lead:             !!lead,
+      blocked:              lead?.blocked              ?? false,
+      lead_added_at:        lead?.created_at          ?? null,
+      is_lead:              !!lead,
+      acquisition_pipeline: lead?.acquisition_pipeline ?? null,
+      surplus_status:       lead?.surplus_status       ?? null,
+      follow_up_at:         lead?.follow_up_at         ?? null,
+      last_contact_at:      lead?.last_contact_at      ?? null,
+      assigned_to:          lead?.assigned_to          ?? null,
     }
   })
 
@@ -307,6 +314,11 @@ export async function GET(req: NextRequest) {
   // AI score min (from leads)
   if (ai_score_min !== null) {
     merged = merged.filter(r => r.ai_score != null && (r.ai_score as number) >= ai_score_min)
+  }
+
+  // Acquisition pipeline filter
+  if (acquisition_pipeline) {
+    merged = merged.filter(r => r.acquisition_pipeline === acquisition_pipeline)
   }
 
   return NextResponse.json({
