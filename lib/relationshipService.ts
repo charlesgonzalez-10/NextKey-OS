@@ -62,6 +62,30 @@ function normEmail(email?: string | null): string | null {
   return trimmed || null
 }
 
+function normStreet(address: string): string {
+  const street = address.split(',')[0] ?? address
+  return street.trim().toLowerCase().replace(/[.,]/g, '').replace(/\s+/g, ' ')
+}
+
+/**
+ * Find the single property whose street address unambiguously matches the
+ * given free-text address. Returns null if there's no match or more than
+ * one candidate — callers should never guess when a link is ambiguous.
+ */
+export async function findPropertyByAddress(address: string): Promise<string | null> {
+  const target = normStreet(address)
+  if (!target) return null
+
+  const { data } = await serviceClient
+    .from('properties')
+    .select('id, property_address')
+    .ilike('property_address', `%${target}%`)
+    .limit(10)
+
+  const matches = (data ?? []).filter(p => normStreet(p.property_address ?? '') === target)
+  return matches.length === 1 ? matches[0].id : null
+}
+
 /** Resolve properties.id → leads.id, auto-creating the lead row if one doesn't exist yet. */
 export async function resolveLeadId(propertyId: string): Promise<string | null> {
   const { data: existing } = await serviceClient
@@ -311,6 +335,7 @@ export const RelationshipService = {
   getContactProperties,
   resolveLeadId,
   addHomeowner,
+  findPropertyByAddress,
 
   /** RelationshipService.linkPropertyOwner(propertyId, contactId, { primary: true }) */
   linkPropertyOwner(propertyId: string, contactId: string, opts: Omit<LinkOptions, 'role'> = {}) {
