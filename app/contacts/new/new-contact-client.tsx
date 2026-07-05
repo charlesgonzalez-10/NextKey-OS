@@ -1,7 +1,6 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 
 const CATEGORIES = ['Seller', 'Buyer', 'Investor', 'Wholesaler', 'Agent', 'Lender', 'Student', 'Other']
@@ -11,7 +10,6 @@ const lCls = 'block text-sm font-semibold mb-1.5'
 
 export default function NewContactClient() {
   const router = useRouter()
-  const supabase = createClient()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [leadTypes, setLeadTypes] = useState<{ id: string; name: string }[]>([])
@@ -40,23 +38,30 @@ export default function NewContactClient() {
     e.preventDefault()
     setLoading(true)
     setError('')
-    const { data, error } = await supabase.from('contacts').insert([{
-      name: form.name,
-      phone: form.phone,
-      email: form.email,
-      address: form.address,
-      category: form.category,
-      tags: form.tags ? form.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
-      notes: form.notes,
-      lead_source: form.lead_source || null,
-      source: form.lead_source || 'Manual',
-      lead_type_id: form.lead_type_id || null,
-      vertical_id: form.vertical_id || null,
-      status: 'Active',
-    }]).select().single()
-
-    if (error) { setError(error.message); setLoading(false) }
-    else router.push(`/contacts/${data.id}`)
+    try {
+      const res = await fetch('/api/contacts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: form.name,
+          phone: form.phone,
+          email: form.email,
+          address: form.address,
+          category: form.category,
+          tags: form.tags ? form.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
+          notes: form.notes,
+          lead_source: form.lead_source,
+          lead_type_id: form.lead_type_id,
+          vertical_id: form.vertical_id,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setError(data.error ?? 'Failed to save contact'); setLoading(false); return }
+      router.push(`/contacts/${data.id}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save contact')
+      setLoading(false)
+    }
   }
 
   return (
