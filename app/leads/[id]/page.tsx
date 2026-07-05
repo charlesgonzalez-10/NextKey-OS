@@ -49,8 +49,6 @@ export default async function LeadWorkspacePage({ params }: { params: Promise<{ 
     is_lead:             !!lead,
   }
 
-  const leadRowId = lead?.id ?? null
-
   const [
     { data: aiSummary },
     { data: notes },
@@ -81,14 +79,15 @@ export default async function LeadWorkspacePage({ params }: { params: Promise<{ 
       .order('created_at', { ascending: false })
       .limit(30),
 
-    leadRowId
-      ? service.from('lead_contacts')
-          .select(`id, relationship_type, is_primary, notes, created_at,
-                   contact:contact_id (id, name, phone, email, address, category, status)`)
-          .eq('lead_id', leadRowId)
-          .order('is_primary', { ascending: false })
-          .limit(10)
-      : Promise.resolve({ data: [] }),
+    // Property ↔ Contact relationships live on contact_properties, keyed by
+    // property_id (the canonical PropertyContact junction — see RelationshipService).
+    service.from('contact_properties')
+      .select(`id, relationship_type, is_primary, notes, created_at, lead_id,
+               contact:contact_id (id, name, phone, email, address, category, status)`)
+      .eq('property_id', id)
+      .order('is_primary', { ascending: false })
+      .order('created_at', { ascending: true })
+      .limit(10),
   ])
 
   return (

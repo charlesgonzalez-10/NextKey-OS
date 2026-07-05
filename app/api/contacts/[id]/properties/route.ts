@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { serviceClient } from '@/lib/supabase-service'
+import { RelationshipService } from '@/lib/relationshipService'
 
 export const dynamic = 'force-dynamic'
 
@@ -16,40 +16,10 @@ export async function GET(
 
   const { id: contactId } = await params
 
-  const { data, error } = await serviceClient
-    .from('contact_properties')
-    .select(`
-      id,
-      relationship_type,
-      is_primary,
-      notes,
-      created_at,
-      lead_id,
-      property:property_id (
-        id,
-        property_address,
-        city,
-        zip,
-        county,
-        beds,
-        baths,
-        living_area,
-        year_built,
-        market_value,
-        assessed_value,
-        equity_tier,
-        equity_percentage,
-        is_pre_foreclosure,
-        is_probate,
-        is_auction,
-        is_tax_deed,
-        is_divorce
-      )
-    `)
-    .eq('contact_id', contactId)
-    .order('is_primary', { ascending: false })
-    .order('created_at', { ascending: false })
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json({ properties: data ?? [] })
+  try {
+    const properties = await RelationshipService.getContactProperties(contactId)
+    return NextResponse.json({ properties })
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : 'Failed' }, { status: 500 })
+  }
 }
