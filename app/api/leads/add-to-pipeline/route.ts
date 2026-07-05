@@ -2,16 +2,18 @@
  * POST /api/leads/add-to-pipeline
  * Body: { lead_id: string }  (lead_id = properties.id for backward compat)
  *
- * Creates a Contact from a property record and links it to both the property
- * and its lead record. This is "I want to actively reach out to this owner."
+ * Creates (or reuses) a Contact from a property record and links it to the
+ * property as the Primary Owner via RelationshipService. This is "I want to
+ * actively reach out to this owner."
  *
  * Flow:
  *  1. Fetch property from properties table
- *  2. Create contact record (people CRM)
- *  3. Update leads.imported_to_contact
- *  4. Update contacts.property_id (link contact back to property)
+ *  2. Find-or-create the Contact (people CRM) — never duplicates
+ *  3. Link Property ↔ Contact as Owner via RelationshipService
+ *  4. Update leads.imported_to_contact
  */
 import { serviceClient } from '@/lib/supabase-service'
+import { RelationshipService } from '@/lib/relationshipService'
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 
@@ -84,27 +86,31 @@ export async function POST(req: NextRequest) {
     property.property_type        ? `Type: ${property.property_type}`                                                  : '',
   ].filter(Boolean).join('\n')
 
-  // Create the contact (people record)
-  const { data: contact, error: contactErr } = await service
-    .from('contacts')
-    .insert([{
-      name:        ownerName,
-      phone:       property.phone_1 || '',
-      address:     property.property_address || '',
-      city:        property.city  || '',
-      zip:         property.zip   || '',
-      category:    'Seller',
-      status:      'Active',
-      source:      `${property.data_source || 'Property Search'} — ${countyName}`,
-      property_id: lead_id,  // link contact to property
-      tags,
-      notes,
-    }])
-    .select('id')
-    .single()
+  // Find-or-create the contact (people record) — reuses an existing contact
+  // matched by phone/email/name instead of always creating a new one.
+  let contactId: string
+  try {
+    const found = await RelationshipService.findOrCreateContact({
+      name:    ownerName,
+      phone:   property.phone_1 || null,
+      address: property.property_address || null,
+      source:  `${property.data_source || 'Property Search'} — ${countyName}`,
+    })
+    contactId = found.id
 
-  if (contactErr || !contact) {
-    return NextResponse.json({ error: contactErr?.message || 'Failed to create contact' }, { status: 500 })
+    // Metadata specific to this pipeline-add action (tags/notes/category) —
+    // only applied when the contact was newly created so we don't overwrite
+    // an existing contact's own categorization/notes.
+    if (found.created) {
+      await service.from('contacts').update({
+        city: property.city || '', zip: property.zip || '',
+        category: 'Seller', status: 'Active', tags, notes,
+      }).eq('id', contactId)
+    }
+
+    await RelationshipService.linkPropertyContact(lead_id, contactId, { role: 'Owner', primary: true })
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : 'Failed to create contact' }, { status: 500 })
   }
 
   // Update the lead record: mark as imported + link to contact
@@ -112,7 +118,7 @@ export async function POST(req: NextRequest) {
     await service
       .from('leads')
       .update({
-        imported_to_contact: contact.id,
+        imported_to_contact: contactId,
         status:              'reviewing',
         updated_at:          new Date().toISOString(),
       })
@@ -123,9 +129,9 @@ export async function POST(req: NextRequest) {
       property_id:         lead_id,
       status:              'reviewing',
       source:              property.source || 'manual',
-      imported_to_contact: contact.id,
+      imported_to_contact: contactId,
     }])
   }
 
-  return NextResponse.json({ ok: true, contact_id: contact.id })
+  return NextResponse.json({ ok: true, contact_id: contactId })
 }

@@ -2,10 +2,12 @@
  * POST /api/leads/bulk-add-to-pipeline
  * Body: { lead_ids: string[] }  (lead_ids = properties.id values)
  *
- * Bulk-creates Contacts from property records and links them to leads.
- * Skips any already imported. Returns counts.
+ * Bulk find-or-creates Contacts from property records and links them to their
+ * properties as Owner via RelationshipService. Skips any already imported.
+ * Returns counts.
  */
 import { serviceClient } from '@/lib/supabase-service'
+import { RelationshipService } from '@/lib/relationshipService'
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 
@@ -85,25 +87,25 @@ export async function POST(req: NextRequest) {
       property.property_type ? `Type: ${property.property_type}` : '',
     ].filter(Boolean).join('\n')
 
-    const { data: contact, error: cErr } = await service
-      .from('contacts')
-      .insert([{
-        name:        ownerName,
-        phone:       property.phone_1 || '',
-        address:     property.property_address || '',
-        city:        property.city || '',
-        zip:         property.zip  || '',
-        category:    'Seller',
-        status:      'Active',
-        source:      `${property.data_source || 'Property Search'} — ${countyName}`,
-        property_id: property.id,
-        tags,
-        notes,
-      }])
-      .select('id')
-      .single()
+    try {
+      const found = await RelationshipService.findOrCreateContact({
+        name:    ownerName,
+        phone:   property.phone_1 || null,
+        address: property.property_address || null,
+        source:  `${property.data_source || 'Property Search'} — ${countyName}`,
+      })
 
-    if (cErr || !contact) continue
+      if (found.created) {
+        await service.from('contacts').update({
+          city: property.city || '', zip: property.zip || '',
+          category: 'Seller', status: 'Active', tags, notes,
+        }).eq('id', found.id)
+      }
+
+      await RelationshipService.linkPropertyContact(property.id, found.id, { role: 'Owner', primary: true })
+    } catch {
+      continue
+    }
 
     createdPropIds.push(property.id)
     created++

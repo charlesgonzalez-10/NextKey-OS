@@ -16,14 +16,15 @@ export async function GET(
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+  // `id` is properties.id (see app/api/leads/[id]/contacts/route.ts for why).
   const { id: leadId } = await params
   const contactId = req.nextUrl.searchParams.get('contact_id')
 
-  // Get contact IDs linked to this lead
+  // Get contact IDs linked to this property
   const { data: linked } = await serviceClient
-    .from('lead_contacts')
+    .from('contact_properties')
     .select('contact_id')
-    .eq('lead_id', leadId)
+    .eq('property_id', leadId)
 
   const contactIds = linked?.map(l => l.contact_id) ?? []
   if (contactIds.length === 0) return NextResponse.json({ messages: [] })

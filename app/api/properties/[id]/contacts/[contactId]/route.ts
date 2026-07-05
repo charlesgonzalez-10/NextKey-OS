@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { serviceClient } from '@/lib/supabase-service'
+import { RelationshipService } from '@/lib/relationshipService'
 
 export const dynamic = 'force-dynamic'
-
-const svc = serviceClient
 
 // PATCH /api/properties/[id]/contacts/[contactId]
 // Body: { relationship_type?, is_primary?, notes? }
@@ -19,32 +17,14 @@ export async function PATCH(
   const { id: propertyId, contactId } = await params
   const { relationship_type, is_primary, notes } = await req.json()
 
-  // When marking primary, clear others first
-  if (is_primary === true) {
-    await svc
-      .from('contact_properties')
-      .update({ is_primary: false })
-      .eq('property_id', propertyId)
+  try {
+    const link = await RelationshipService.updatePropertyContactRole(propertyId, contactId, {
+      relationship_type, is_primary, notes,
+    })
+    return NextResponse.json({ link })
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : 'Failed' }, { status: 500 })
   }
-
-  const patch: Record<string, unknown> = {}
-  if (relationship_type !== undefined) patch.relationship_type = relationship_type
-  if (is_primary       !== undefined) patch.is_primary       = is_primary
-  if (notes            !== undefined) patch.notes            = notes
-
-  const { data, error } = await svc
-    .from('contact_properties')
-    .update(patch)
-    .eq('property_id', propertyId)
-    .eq('contact_id', contactId)
-    .select(`
-      id, relationship_type, is_primary, notes,
-      contact:contact_id (id, name, phone, email, address, category)
-    `)
-    .single()
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json({ link: data })
 }
 
 // DELETE /api/properties/[id]/contacts/[contactId]
@@ -59,12 +39,10 @@ export async function DELETE(
 
   const { id: propertyId, contactId } = await params
 
-  const { error } = await svc
-    .from('contact_properties')
-    .delete()
-    .eq('property_id', propertyId)
-    .eq('contact_id', contactId)
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json({ ok: true })
+  try {
+    await RelationshipService.unlinkPropertyContact(propertyId, contactId)
+    return NextResponse.json({ ok: true })
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : 'Failed' }, { status: 500 })
+  }
 }
