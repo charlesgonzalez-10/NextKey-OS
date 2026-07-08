@@ -194,7 +194,7 @@ export default function WorkspaceClient(props: WorkspaceClientProps) {
 
   const refreshContacts = useCallback(async () => {
     try {
-      const res = await fetch(`/api/leads/${propertyId}/contacts`)
+      const res = await fetch(`/api/properties/${propertyId}/contacts`)
       if (res.ok) {
         const data = await res.json()
         setContacts(data.contacts ?? [])

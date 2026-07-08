@@ -80,7 +80,7 @@ export default function PeopleTab() {
   const linkExisting = async (contactId: string) => {
     setSaving(true); setSaveErr(null)
     try {
-      const res = await fetch(`/api/leads/${propertyId}/contacts`, {
+      const res = await fetch(`/api/properties/${propertyId}/contacts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contact_id: contactId, relationship_type: linkRelType, is_primary: linkPrimary }),
@@ -97,7 +97,7 @@ export default function PeopleTab() {
     if (!form.name.trim()) { setSaveErr('Name is required'); return }
     setSaving(true); setSaveErr(null)
     try {
-      const res = await fetch(`/api/leads/${propertyId}/contacts`, {
+      const res = await fetch(`/api/properties/${propertyId}/contacts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -121,7 +121,7 @@ export default function PeopleTab() {
     if (!lead.owner_name?.trim()) return
     setImporting(true); setActionErr(null)
     try {
-      const res = await fetch(`/api/leads/${propertyId}/contacts`, {
+      const res = await fetch(`/api/properties/${propertyId}/contacts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: lead.owner_name, relationship_type: 'Owner', is_primary: true }),
@@ -138,7 +138,7 @@ export default function PeopleTab() {
   const makePrimary = async (contactId: string) => {
     setActionErr(null)
     try {
-      const res = await fetch(`/api/leads/${propertyId}/contacts/${contactId}`, {
+      const res = await fetch(`/api/properties/${propertyId}/contacts/${contactId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ is_primary: true }),
@@ -151,7 +151,7 @@ export default function PeopleTab() {
   const removeContact = async (contactId: string) => {
     setActionErr(null)
     try {
-      const res = await fetch(`/api/leads/${propertyId}/contacts/${contactId}`, { method: 'DELETE' })
+      const res = await fetch(`/api/properties/${propertyId}/contacts/${contactId}`, { method: 'DELETE' })
       if (!res.ok) throw new Error('Failed to remove')
       await refreshContacts()
     } catch (e) { setActionErr(e instanceof Error ? e.message : 'Error') }
@@ -160,7 +160,7 @@ export default function PeopleTab() {
   const updateRelType = async (contactId: string, rel: string) => {
     setActionErr(null)
     try {
-      await fetch(`/api/leads/${propertyId}/contacts/${contactId}`, {
+      await fetch(`/api/properties/${propertyId}/contacts/${contactId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ relationship_type: rel }),
