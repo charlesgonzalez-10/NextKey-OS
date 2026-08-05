@@ -40,6 +40,11 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
+  if (process.env.CRON_REFRESH_SAVED_ENABLED === 'false') {
+    console.log('[RefreshSaved] Skipped — CRON_REFRESH_SAVED_ENABLED=false')
+    return NextResponse.json({ status: 'paused', reason: 'cron_disabled' })
+  }
+
   const supabase  = getSupabase()
   const startedAt = Date.now()
 

@@ -52,6 +52,11 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
+  if (process.env.CRON_INGEST_DISTRESS_ENABLED === 'false') {
+    console.log('[Cron: ingest-distress] Skipped — CRON_INGEST_DISTRESS_ENABLED=false')
+    return NextResponse.json({ status: 'paused', reason: 'cron_disabled' })
+  }
+
   // ── Parse params ──────────────────────────────────────────────────────────
   const url      = new URL(request.url)
   const rawParam = url.searchParams.get('counties')
