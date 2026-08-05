@@ -31,6 +31,7 @@ import type {
   PropertyDistressData,
   County,
 } from './types'
+import type { BillingContext } from '@/lib/billing/gatewayContext'
 import type { PropertySourceResult } from '../property-sources/types'
 import { tryCountyPASources, tryFolioLookup } from '../property-sources/registry'
 
@@ -331,27 +332,39 @@ async function searchViaCountyPA(
 
 async function searchViaREAPI(
   query: string,
-  county: County
+  county: County,
+  billing?: BillingContext
 ): Promise<PropertySearchResult | null> {
-  if (!process.env.REAPI_KEY) {
-    console.warn('[PropertySearch] REAPI_KEY not set — cannot search Broward/Palm Beach')
+  if (!billing) {
+    console.warn('[PropertySearch] No billing context — REAPI fallback skipped')
     return null
   }
 
   // Check if looks like a folio
   const cleanedFolio = query.replace(/[^0-9]/g, '')
   if (/^\d{10,15}$/.test(cleanedFolio)) {
-    return getPropertyByAPN(cleanedFolio, county)
+    const outcome = await getPropertyByAPN(cleanedFolio, county, billing)
+    if (outcome.outcome !== 'success') {
+      console.warn(`[PropertySearch] REAPI APN lookup ${outcome.outcome}:`, outcome.outcome === 'blocked' ? outcome.error_code : outcome.error)
+      return null
+    }
+    return outcome.data
   }
 
-  return getPropertyDetailByAddress(query, county)
+  const outcome = await getPropertyDetailByAddress(query, county, billing)
+  if (outcome.outcome !== 'success') {
+    console.warn(`[PropertySearch] REAPI address lookup ${outcome.outcome}:`, outcome.outcome === 'blocked' ? outcome.error_code : outcome.error)
+    return null
+  }
+  return outcome.data
 }
 
 // ─── Main unified search entry point ─────────────────────────────────────────
 
 export async function searchProperty(
   query: string,
-  countyHint?: County
+  countyHint?: County,
+  billing?: BillingContext
 ): Promise<PropertySearchResult | null> {
   const county = countyHint && countyHint !== 'unknown'
     ? countyHint
@@ -367,13 +380,13 @@ export async function searchProperty(
     result = await searchViaCountyPA(query, county)
     if (!result) {
       console.log(`[PropertySearch] ${county} PA returned null — falling back to REAPI`)
-      result = await searchViaREAPI(query, county)
+      result = await searchViaREAPI(query, county, billing)
     }
   } else if (county === 'martin' || county === 'st-lucie') {
     // Stubs return null → go straight to REAPI
     result = await searchViaCountyPA(query, county)
     if (!result) {
-      result = await searchViaREAPI(query, county)
+      result = await searchViaREAPI(query, county, billing)
     }
   } else {
     // Unknown county — try Miami-Dade GIS, then Broward PA, then Palm Beach PA, then REAPI
@@ -385,8 +398,8 @@ export async function searchProperty(
     if (!result) {
       result = await searchViaCountyPA(query, 'palm-beach')
     }
-    if (!result && process.env.REAPI_KEY) {
-      result = await searchViaREAPI(query, 'broward')
+    if (!result) {
+      result = await searchViaREAPI(query, 'broward', billing)
     }
   }
 
@@ -406,7 +419,8 @@ export async function searchProperty(
  */
 export async function enrichLeadById(
   leadId: string,
-  force = false
+  force = false,
+  billing?: BillingContext
 ): Promise<{ result: PropertySearchResult; folio: string } | { skipped: true } | null> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: lead } = await (getService()
@@ -432,7 +446,7 @@ export async function enrichLeadById(
     result = await searchMiamiDade(folio ? `folio:${folio}` : address)
     if (result?.folio) folio = result.folio
   } else {
-    result = await searchViaREAPI(address, county as County)
+    result = await searchViaREAPI(address, county as County, billing)
     if (result?.folio) folio = result.folio
   }
 
