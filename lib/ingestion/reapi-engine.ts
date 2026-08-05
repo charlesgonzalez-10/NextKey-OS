@@ -1,52 +1,53 @@
 /**
- * REAPI Pre-Foreclosure Ingestion Engine
+ * REAPI Pre-Foreclosure Ingestion Engine — Gateway-enforced
  *
- * Replaces the county OR SFTP/web scrapers with a single REAPI-powered
- * pipeline. RealEstateAPI's /v2/PropertySearch endpoint is pre-filtered
- * for pre_foreclosure, foreclosure, and auction records with daily updates.
+ * Every REAPI PropertySearch page is authorized through ProviderGateway before
+ * the network call is made.  Budget exhaustion pauses the run gracefully — no
+ * records are lost and no un-reserved call is ever made.
  *
- * Flow per county:
- *   1. Fetch all distress records via paginated REAPI calls (250/page)
- *   2. Dedup by APN (folio_number) — skip if already in DB with same flags
- *   3. Upsert properties table (rich data — no resolver step needed)
- *   4. Create leads entry if not already in pipeline
- *   5. Log to scraper_runs
+ * Pool:      background_operations (BACKGROUND_CONTEXT)
+ * Credits:   0 — background jobs never charge customer credits
+ * Cost:      5¢/page  (property_search_criteria feature)
+ * Idempotency: request_id = ing-{runId}-{county}-{distressType}-p{pageNum}
  *
- * Covers: Broward · Miami-Dade · Palm Beach
+ * Run controls (all configurable, with safe defaults):
+ *   maxCallsPerRun       — hard cap on authorize+fetch cycles
+ *   maxVendorCostCents   — hard cap on estimated spend per run
+ *   maxRecordsPerRun     — stop after N records processed
+ *   maxPagesPerDistressType — per (county × distressType) page limit
+ *   timeoutMs            — wall-clock run timeout
+ *
+ * Checkpoint / resume:
+ *   A checkpoint is emitted in REAPIRunResult.checkpoint whenever the run is
+ *   paused (budget, limit, timeout).  Pass it back as resumeFrom to continue
+ *   exactly where processing left off — previously authorized pages are never
+ *   re-authorized.
  */
 
 import { createClient } from '@supabase/supabase-js'
 import { detectEntityType } from '@/lib/scrapers/utils'
 import { markModuleRefreshed } from '@/lib/propertyService'
 import { recordFieldSources, logDSOERequest } from '@/lib/dsoe'
+import { providerGateway } from '@/lib/billing/providerGateway'
+import { pricingEngine } from '@/lib/billing/pricingEngine'
+import { BACKGROUND_CONTEXT } from '@/lib/billing/gatewayContext'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type REAPICounty = 'broward' | 'miami-dade' | 'palm-beach'
+export type REAPICounty   = 'broward' | 'miami-dade' | 'palm-beach'
+export type DistressType  = 'pre_foreclosure' | 'foreclosure' | 'auction'
 
 /** Raw property record from REAPI /v2/PropertySearch */
 interface REAPIProperty {
   propertyId:            string | number
   apn?:                  string
   address?: {
-    address?: string
-    street?:  string
-    city?:    string
-    state?:   string
-    zip?:     string
-    county?:  string
-    fips?:    string
+    address?: string; street?: string; city?: string
+    state?: string; zip?: string; county?: string; fips?: string
   }
-  mailAddress?: {
-    address?: string
-    city?:    string
-    state?:   string
-    zip?:     string
-  }
-  owner1FirstName?:      string
-  owner1LastName?:       string
-  owner2FirstName?:      string
-  owner2LastName?:       string
+  mailAddress?: { address?: string; city?: string; state?: string; zip?: string }
+  owner1FirstName?: string; owner1LastName?: string
+  owner2FirstName?: string; owner2LastName?: string
   companyName?:          string
   bedrooms?:             number | null
   bathrooms?:            number | null
@@ -79,54 +80,97 @@ interface REAPIProperty {
   vacant?:               boolean
   pool?:                 boolean
   hoa?:                  boolean
-  neighborhood?: { name?: string }
+  neighborhood?:         { name?: string }
   mlsStatus?:            string | null
   mlsListingPrice?:      number | null
   mlsActive?:            boolean
 }
 
 interface REAPISearchResponse {
-  statusCode?:   number
+  statusCode?:    number
   statusMessage?: string
-  message?:      string
-  data?:         REAPIProperty[]
-  resultCount?:  number
-  resultIndex?:  number
-  recordCount?:  number
+  message?:       string
+  data?:          REAPIProperty[]
+  resultCount?:   number
+  resultIndex?:   number
+  recordCount?:   number
 }
 
+/** Where a paused run should resume. */
+export interface IngestionCheckpoint {
+  county:        REAPICounty
+  distress_type: DistressType
+  next_page_index: number
+}
+
+export interface IngestionRunConfig {
+  /** Max total authorize+fetch cycles for the whole run (across all counties). Default: 60. */
+  maxCallsPerRun:          number
+  /** Max total estimated vendor spend cents for the whole run. Default: 300 (= $3.00). */
+  maxVendorCostCents:      number
+  /** Max property records processed for the whole run. Default: 15_000. */
+  maxRecordsPerRun:        number
+  /** Max pages fetched per (county × distressType) segment. Default: 20. */
+  maxPagesPerDistressType: number
+  /** Wall-clock timeout in ms. Default: 240_000 (4 min). */
+  timeoutMs:               number
+}
+
+export const DEFAULT_INGESTION_CONFIG: IngestionRunConfig = {
+  maxCallsPerRun:          60,
+  maxVendorCostCents:      300,
+  maxRecordsPerRun:        15_000,
+  maxPagesPerDistressType: 20,
+  timeoutMs:               240_000,
+}
+
+export const INGESTION_FEATURE_KEY = 'property_search_criteria'
+
 export interface REAPIIngestionResult {
-  county:      REAPICounty
-  fetched:     number
-  inserted:    number
-  updated:     number
-  skipped:     number
-  errors:      number
-  source:      string
+  county:               REAPICounty
+  distress_type?:       DistressType  // null when summarising across all types
+  fetched:              number
+  inserted:             number
+  updated:              number
+  skipped:              number
+  errors:               number
+  calls_attempted:      number
+  calls_completed:      number
+  estimated_cost_cents: number
+  actual_cost_cents:    number
+  source:               string
 }
 
 export interface REAPIRunResult {
-  run_id:         string
-  started_at:     string
-  completed_at:   string
-  duration_ms:    number
-  total_inserted: number
-  total_updated:  number
-  total_skipped:  number
-  total_errors:   number
-  counties:       REAPIIngestionResult[]
+  run_id:               string
+  job_id:               string
+  started_at:           string
+  completed_at:         string
+  duration_ms:          number
+  total_inserted:       number
+  total_updated:        number
+  total_skipped:        number
+  total_errors:         number
+  calls_attempted:      number
+  calls_completed:      number
+  estimated_cost_cents: number
+  actual_cost_cents:    number
+  records_processed:    number
+  paused:               boolean
+  pause_reason?:        string
+  checkpoint?:          IngestionCheckpoint
+  counties:             REAPIIngestionResult[]
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const REAPI_BASE  = 'https://api.realestateapi.com/v2'
-const PAGE_SIZE   = 250   // REAPI max is 250
+const REAPI_BASE = 'https://api.realestateapi.com/v2'
+const PAGE_SIZE  = 250
 
-/** Maps our county ID to REAPI's county name format */
 const COUNTY_LABEL: Record<REAPICounty, string> = {
-  'broward':     'Broward',
-  'miami-dade':  'Miami-Dade',
-  'palm-beach':  'Palm Beach',
+  'broward':    'Broward',
+  'miami-dade': 'Miami-Dade',
+  'palm-beach': 'Palm Beach',
 }
 
 const DATA_SOURCE_LABEL: Record<REAPICounty, string> = {
@@ -144,17 +188,15 @@ function getSupabase() {
   )
 }
 
-/** Returns the last business day (Mon–Fri) as YYYY-MM-DD */
 function lastBusinessDayISO(): string {
   const d = new Date()
   d.setDate(d.getDate() - 1)
   const dow = d.getDay()
-  if (dow === 0) d.setDate(d.getDate() - 2)  // Sun → Fri
-  if (dow === 6) d.setDate(d.getDate() - 1)  // Sat → Fri
+  if (dow === 0) d.setDate(d.getDate() - 2)
+  if (dow === 6) d.setDate(d.getDate() - 1)
   return d.toISOString().slice(0, 10)
 }
 
-/** Equity tier from percentage */
 function equityTier(pct: number | null | undefined): 'High' | 'Medium' | 'Low' | 'None' {
   if (pct == null || pct <= 0) return 'None'
   if (pct >= 50) return 'High'
@@ -162,15 +204,13 @@ function equityTier(pct: number | null | undefined): 'High' | 'Medium' | 'Low' |
   return 'Low'
 }
 
-/** Build full owner name from REAPI fields */
 function ownerName(p: REAPIProperty): string {
-  const first = [p.owner1FirstName, p.owner1LastName].filter(Boolean).join(' ').trim()
+  const first  = [p.owner1FirstName, p.owner1LastName].filter(Boolean).join(' ').trim()
   const second = [p.owner2FirstName, p.owner2LastName].filter(Boolean).join(' ').trim()
   if (first && second) return `${first} & ${second}`
   return first || p.companyName || ''
 }
 
-/** Derive county from address.county string returned by REAPI */
 function countyFromAddress(raw: string | undefined): REAPICounty | null {
   if (!raw) return null
   const lower = raw.toLowerCase()
@@ -180,117 +220,95 @@ function countyFromAddress(raw: string | undefined): REAPICounty | null {
   return null
 }
 
-/** Map REAPI noticeType → foreclosure_type code */
 function foreclosureType(p: REAPIProperty): string {
-  if (p.auction)      return 'A'
-  if (p.foreclosure)  return 'F'
-  return 'P'   // pre-foreclosure / lis pendens
+  if (p.auction)     return 'A'
+  if (p.foreclosure) return 'F'
+  return 'P'
 }
 
-/** Normalise suggestedRent → number or null */
 function parseSuggestedRent(raw: string | number | null | undefined): number | null {
   if (raw == null) return null
   const n = typeof raw === 'number' ? raw : parseFloat(String(raw).replace(/[^0-9.]/g, ''))
   return isNaN(n) ? null : n
 }
 
-/** Parse REAPI's "YYYY-MM-DD HH:MM:SS UTC" or "YYYY-MM-DD" to date-only string */
 function toDateStr(raw: string | null | undefined): string | null {
   if (!raw) return null
-  return raw.slice(0, 10)   // first 10 chars = YYYY-MM-DD
+  return raw.slice(0, 10)
 }
 
-// ─── REAPI fetcher (paginated) ────────────────────────────────────────────────
+// ─── Single-page fetcher ──────────────────────────────────────────────────────
 
-/**
- * Fetches ALL distress records for one county + distress type.
- * Paginates automatically using resultIndex until all pages are retrieved.
- */
-async function fetchDistressRecords(
+interface PageResult {
+  records:    REAPIProperty[]
+  total:      number
+  returned:   number
+  nextIndex:  number
+}
+
+async function fetchDistressPage(
+  apiKey:      string,
   county:      REAPICounty,
-  distressKey: 'pre_foreclosure' | 'foreclosure' | 'auction',
+  distressKey: DistressType,
   dateMin:     string,
-  dateMax:     string
-): Promise<REAPIProperty[]> {
-  const key = process.env.REAPI_KEY
-  if (!key) throw new Error('REAPI_KEY environment variable is not set')
+  dateMax:     string,
+  pageIndex:   number,
+): Promise<PageResult> {
+  const dateField    = distressKey === 'pre_foreclosure' ? 'pre_foreclosure_date_min'
+                     : distressKey === 'foreclosure'      ? 'foreclosure_date_min'
+                     : 'auction_date_min'
+  const dateFieldMax = dateField.replace('_min', '_max')
 
-  const dateFilterKey = distressKey === 'pre_foreclosure' ? 'pre_foreclosure_date_min'
-                      : distressKey === 'foreclosure'      ? 'foreclosure_date_min'
-                      : 'auction_date_min'
-  const dateFilterKeyMax = dateFilterKey.replace('_min', '_max')
+  const body: Record<string, unknown> = {
+    state:          'FL',
+    county:         COUNTY_LABEL[county],
+    [distressKey]:  true,
+    [dateField]:    dateMin,
+    [dateFieldMax]: dateMax,
+    size:           PAGE_SIZE,
+  }
+  if (pageIndex > 1) body.resultIndex = pageIndex
 
-  const records: REAPIProperty[] = []
-  let resultIndex = 1
+  const res = await fetch(`${REAPI_BASE}/PropertySearch`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+    body:    JSON.stringify(body),
+    signal:  AbortSignal.timeout(30_000),
+  })
 
-  while (true) {
-    const body: Record<string, unknown> = {
-      state:           'FL',
-      county:          COUNTY_LABEL[county],
-      [distressKey]:   true,
-      [dateFilterKey]: dateMin,
-      [dateFilterKeyMax]: dateMax,
-      size:            PAGE_SIZE,
-    }
-    if (resultIndex > 1) body.resultIndex = resultIndex
-
-    const res = await fetch(`${REAPI_BASE}/PropertySearch`, {
-      method:  'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key':    key,
-      },
-      body:    JSON.stringify(body),
-      signal:  AbortSignal.timeout(30_000),
-    })
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      throw new Error(`REAPI HTTP ${res.status}: ${text.slice(0, 200)}`)
-    }
-
-    const data: REAPISearchResponse = await res.json()
-
-    if (data.statusCode && data.statusCode !== 200) {
-      throw new Error(`REAPI error ${data.statusCode}: ${data.message ?? data.statusMessage}`)
-    }
-
-    const page = data.data ?? []
-    records.push(...page)
-
-    const total    = data.resultCount ?? 0
-    const nextIdx  = data.resultIndex ?? 1
-    const returned = data.recordCount ?? page.length
-
-    console.log(`[REAPI] ${county}/${distressKey} page resultIndex=${resultIndex}: ${returned} records (${records.length}/${total} total)`)
-
-    // Stop when we've fetched everything
-    if (records.length >= total || returned < PAGE_SIZE || page.length === 0) break
-
-    resultIndex = nextIdx
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`REAPI HTTP ${res.status}: ${text.slice(0, 200)}`)
   }
 
-  return records
+  const data: REAPISearchResponse = await res.json()
+  if (data.statusCode && data.statusCode !== 200) {
+    throw new Error(`REAPI error ${data.statusCode}: ${data.message ?? data.statusMessage}`)
+  }
+
+  const page = data.data ?? []
+  return {
+    records:   page,
+    total:     data.resultCount ?? 0,
+    returned:  data.recordCount ?? page.length,
+    nextIndex: data.resultIndex ?? pageIndex + PAGE_SIZE,
+  }
 }
 
 // ─── Single-property ingestion ────────────────────────────────────────────────
 
 async function ingestProperty(
-  supabase:  ReturnType<typeof getSupabase>,
-  p:         REAPIProperty,
-  county:    REAPICounty,
-  runId:     string
+  supabase:         ReturnType<typeof getSupabase>,
+  p:                REAPIProperty,
+  county:           REAPICounty,
+  runId:            string,
+  actualCostCents:  number,
 ): Promise<'inserted' | 'updated' | 'skipped' | 'error'> {
   const apn = p.apn?.trim()
-  if (!apn) return 'skipped'   // no folio → can't dedup
+  if (!apn) return 'skipped'
 
-  // case_number is intentionally null — REAPI doesn't provide county court case numbers
-  // The folio_number (APN) is the primary dedup key for REAPI-sourced properties
   const addr  = p.address ?? {}
-  const mail  = p.mailAddress ?? {}
   const oName = ownerName(p)
-
-  // Determine which county we're in (double-check from address if available)
   const addrCounty = countyFromAddress(addr.county)
   const effectiveCounty = addrCounty ?? county
 
@@ -299,18 +317,15 @@ async function ingestProperty(
   const mktVal    = p.estimatedValue ?? null
   const equityAmt = (mktVal != null && debtAmt != null) ? Math.max(0, mktVal - debtAmt) : (p.estimatedEquity ?? null)
 
-  // file_date: use lastUpdateDate (REAPI's last update, approximates LP date)
-  // For auction, prefer auctionDate if available
   const fileDate = p.auction && p.auctionDate
-    ? toDateStr(p.auctionDate)
-    : toDateStr(p.lastUpdateDate)
+    ? toDateStr(p.auctionDate) : toDateStr(p.lastUpdateDate)
 
   const payload = {
     scraper_run_id:     runId,
     source:             'reapi',
     county:             effectiveCounty,
     data_source:        DATA_SOURCE_LABEL[effectiveCounty],
-    case_number:        null,   // not available from REAPI — county clerk index only
+    case_number:        null,
     file_date:          fileDate,
     plaintiff:          p.lenderName ?? null,
     lender_name:        p.lenderName ?? null,
@@ -318,19 +333,14 @@ async function ingestProperty(
     foreclosure_amount: debtAmt ?? null,
     foreclosure_type:   foreclosureType(p),
 
-    // Distress flags
     is_pre_foreclosure: p.preForeclosure ?? false,
     is_foreclosure:     p.foreclosure    ?? false,
     is_auction:         p.auction        ?? false,
-    is_probate:         false,
-    is_tax_deed:        false,
-    is_divorce:         false,
-    is_reo:             false,
-    multiple_liens:     false,
-    free_clear:         p.freeClear     ?? false,
-    high_equity:        p.highEquity    ?? (equityTier(equityPct) === 'High'),
+    is_probate:         false, is_tax_deed: false, is_divorce: false,
+    is_reo:             false, multiple_liens: false,
+    free_clear:         p.freeClear   ?? false,
+    high_equity:        p.highEquity  ?? (equityTier(equityPct) === 'High'),
 
-    // Property identity
     folio_number:       apn,
     owner_name:         oName || null,
     property_address:   addr.address ?? (`${addr.street ?? ''} ${addr.city ?? ''} ${addr.state ?? 'FL'} ${addr.zip ?? ''}`.trim() || null),
@@ -339,42 +349,32 @@ async function ingestProperty(
     state:              'FL',
     entity_type:        detectEntityType(oName),
 
-    // Property details
-    beds:               p.bedrooms   ?? null,
-    baths:              p.bathrooms  ?? null,
-    year_built:         p.yearBuilt  ?? null,
-    living_area:        p.squareFeet ?? null,
+    beds:               p.bedrooms      ?? null,
+    baths:              p.bathrooms     ?? null,
+    year_built:         p.yearBuilt     ?? null,
+    living_area:        p.squareFeet    ?? null,
     lot_size:           p.lotSquareFeet ?? null,
-    property_type:      p.propertyType ?? p.propertyUse ?? null,
+    property_type:      p.propertyType  ?? p.propertyUse ?? null,
 
-    // Financials
-    assessed_value:     p.assessedValue ?? null,
-    market_value:       mktVal,
-    known_debt:         debtAmt,
-    equity_percentage:  equityPct,
+    assessed_value:       p.assessedValue ?? null,
+    market_value:         mktVal,
+    known_debt:           debtAmt,
+    equity_percentage:    equityPct,
     equity_dollar_amount: equityAmt,
-    equity_tier:        equityTier(equityPct),
+    equity_tier:          equityTier(equityPct),
 
-    // Occupancy / status
-    homestead:          p.ownerOccupied  ?? null,
-    vacant:             p.vacant         ?? null,
-    absentee_owner:     p.absenteeOwner  ?? null,
+    homestead:          p.ownerOccupied ?? null,
+    vacant:             p.vacant        ?? null,
+    absentee_owner:     p.absenteeOwner ?? null,
 
-    // Geo
     latitude:           p.latitude  ?? null,
     longitude:          p.longitude ?? null,
-
-    // Misc
     suggested_rent:     parseSuggestedRent(p.suggestedRent),
     subdivision_name:   p.neighborhood?.name ?? null,
-
-    // Raw data blob
     raw_reapi:          p as object,
-
     updated_at:         new Date().toISOString(),
   }
 
-  // ── Dedup by folio_number ──────────────────────────────────────────────────
   const { data: existing } = await supabase
     .from('properties')
     .select('id, is_pre_foreclosure, is_foreclosure, is_auction, foreclosure_status_override')
@@ -384,12 +384,9 @@ async function ingestProperty(
   let propertyId: string
 
   if (existing) {
-    // Already in DB. Update distress flags and financials.
-    // Never overwrite foreclosure_status_override — that is a manual operational field.
-    // If the REAPI-derived status changes while an override is active, flag it.
-    const prevREAPI = (existing.is_foreclosure || existing.is_auction) ? 'Active' : existing.is_pre_foreclosure ? 'Pending' : null
-    const newREAPI  = (payload.is_foreclosure  || payload.is_auction)  ? 'Active' : payload.is_pre_foreclosure  ? 'Pending' : null
-    const reapiChanged = !!(existing.foreclosure_status_override && prevREAPI !== newREAPI)
+    const prevState  = (existing.is_foreclosure || existing.is_auction) ? 'Active' : existing.is_pre_foreclosure ? 'Pending' : null
+    const newState   = (payload.is_foreclosure  || payload.is_auction)  ? 'Active' : payload.is_pre_foreclosure  ? 'Pending' : null
+    const reapiChanged = !!(existing.foreclosure_status_override && prevState !== newState)
 
     const { error: updErr } = await supabase
       .from('properties')
@@ -420,7 +417,6 @@ async function ingestProperty(
     }
     propertyId = existing.id
   } else {
-    // New property
     const { data: newProp, error: insErr } = await supabase
       .from('properties')
       .insert([payload])
@@ -434,9 +430,6 @@ async function ingestProperty(
     propertyId = newProp.id
   }
 
-  // ── Seed property_freshness ────────────────────────────────────────────────
-  // Marks modules as fresh so the first workspace open doesn't trigger
-  // redundant Rentcast or REAPI calls for data we just ingested.
   void Promise.all([
     markModuleRefreshed(propertyId, 'foreclosure', 'reapi-ingest'),
     markModuleRefreshed(propertyId, 'valuation',   'reapi-ingest'),
@@ -445,118 +438,214 @@ async function ingestProperty(
     markModuleRefreshed(propertyId, 'rental',      'reapi-ingest'),
   ]).catch(() => {})
 
-  // ── Record DSOE field provenance ───────────────────────────────────────────
   void recordFieldSources(propertyId, {
-    owner_name:      payload.owner_name,
-    folio:           payload.folio_number,
-    beds:            payload.beds,
-    baths:           payload.baths,
-    year_built:      payload.year_built,
-    living_area:     payload.living_area,
-    lot_size:        payload.lot_size,
-    assessed_value:  payload.assessed_value,
-    market_value:    payload.market_value,
-    homestead:       payload.homestead,
-    absentee_owner:  payload.absentee_owner,
-  }, {
-    source:      'reapi',
-    sourceType:  'paid',
-    sourceLabel: 'RealEstateAPI',
-    confidence:  95,
-  })
+    owner_name: payload.owner_name, folio: payload.folio_number,
+    beds: payload.beds, baths: payload.baths, year_built: payload.year_built,
+    living_area: payload.living_area, lot_size: payload.lot_size,
+    assessed_value: payload.assessed_value, market_value: payload.market_value,
+    homestead: payload.homestead, absentee_owner: payload.absentee_owner,
+  }, { source: 'reapi', sourceType: 'paid', sourceLabel: 'RealEstateAPI', confidence: 95 })
+
   logDSOERequest({
     propertyId,
-    tier:           3,
-    source:         'reapi',
-    fieldsResolved: 11,
-    cacheHits:      0,
-    countyHits:     0,
-    premiumHits:    11,
-    costCents:      5,
-    durationMs:     0,
+    tier: 3, source: 'reapi', fieldsResolved: 11, cacheHits: 0, countyHits: 0,
+    premiumHits: 11, costCents: actualCostCents, durationMs: 0,
   })
 
-  // ── Ensure a leads entry exists ────────────────────────────────────────────
   const { data: existingLead } = await supabase
-    .from('leads')
-    .select('id')
-    .eq('property_id', propertyId)
-    .maybeSingle()
+    .from('leads').select('id').eq('property_id', propertyId).maybeSingle()
 
   if (!existingLead) {
-    const { error: leadErr } = await supabase
-      .from('leads')
-      .insert([{
-        property_id: propertyId,
-        status:      'new',
-        source:      'reapi',
-      }])
-
-    if (leadErr) {
-      console.warn(`[REAPI Engine] leads insert failed for ${propertyId}:`, leadErr.message)
-      // Don't count as error — property was saved
-    }
+    await supabase.from('leads')
+      .insert([{ property_id: propertyId, status: 'new', source: 'reapi' }])
+      .then(({ error }) => {
+        if (error) console.warn(`[REAPI Engine] leads insert failed for ${propertyId}:`, error.message)
+      })
   }
 
   return existing ? 'updated' : 'inserted'
 }
 
-// ─── County-level ingestion ───────────────────────────────────────────────────
+// ─── Run-level state ──────────────────────────────────────────────────────────
 
-async function ingestCounty(
-  supabase:  ReturnType<typeof getSupabase>,
-  county:    REAPICounty,
-  dateMin:   string,
-  dateMax:   string,
-  runId:     string
+interface RunState {
+  callsAttempted:      number
+  callsCompleted:      number
+  estimatedCostCents:  number
+  actualCostCents:     number
+  recordsProcessed:    number
+  paused:              boolean
+  pauseReason:         string | undefined
+  checkpoint:          IngestionCheckpoint | undefined
+}
+
+// ─── County + distress-type segment ingestion ─────────────────────────────────
+
+async function ingestSegment(
+  supabase:    ReturnType<typeof getSupabase>,
+  apiKey:      string,
+  county:      REAPICounty,
+  distressType: DistressType,
+  dateMin:     string,
+  dateMax:     string,
+  runId:       string,
+  startPageIndex: number,
+  config:      IngestionRunConfig,
+  runState:    RunState,
+  startTime:   number,
+  pricing:     { expected_vendor_cost_cents: number },
 ): Promise<REAPIIngestionResult> {
   const result: REAPIIngestionResult = {
     county,
-    fetched:  0,
-    inserted: 0,
-    updated:  0,
-    skipped:  0,
-    errors:   0,
-    source:   `REAPI:${dateMin}`,
+    distress_type:        distressType,
+    fetched:              0,
+    inserted:             0,
+    updated:              0,
+    skipped:              0,
+    errors:               0,
+    calls_attempted:      0,
+    calls_completed:      0,
+    estimated_cost_cents: 0,
+    actual_cost_cents:    0,
+    source:               `REAPI:${dateMin}`,
   }
 
-  // Fetch all distress types
-  const distressTypes: Array<'pre_foreclosure' | 'foreclosure' | 'auction'> = [
-    'pre_foreclosure',
-    'foreclosure',
-    'auction',
-  ]
-
-  const allRecords: REAPIProperty[] = []
   const seenAPNs = new Set<string>()
+  let pageIndex  = startPageIndex
+  let pageNum    = 1
 
-  for (const dtype of distressTypes) {
-    try {
-      const records = await fetchDistressRecords(county, dtype, dateMin, dateMax)
-      // Deduplicate across distress types (same property can be pre_fc + foreclosure)
-      for (const r of records) {
-        const apn = r.apn?.trim()
-        if (apn && !seenAPNs.has(apn)) {
-          seenAPNs.add(apn)
-          allRecords.push(r)
-        }
-      }
-    } catch (err) {
-      console.error(`[REAPI Engine] ${county}/${dtype} fetch failed:`, err)
-      result.errors++
+  while (pageNum <= config.maxPagesPerDistressType) {
+    // ── Run-level limit checks ────────────────────────────────────────────
+    if (runState.callsAttempted >= config.maxCallsPerRun) {
+      runState.paused     = true
+      runState.pauseReason = 'max_calls_reached'
+      runState.checkpoint  = { county, distress_type: distressType, next_page_index: pageIndex }
+      console.log(`[REAPI Engine] max_calls_reached at ${county}/${distressType} page ${pageIndex}`)
+      break
     }
-  }
+    if (runState.estimatedCostCents + pricing.expected_vendor_cost_cents > config.maxVendorCostCents) {
+      runState.paused      = true
+      runState.pauseReason = 'max_cost_reached'
+      runState.checkpoint  = { county, distress_type: distressType, next_page_index: pageIndex }
+      console.log(`[REAPI Engine] max_cost_reached at ${county}/${distressType} page ${pageIndex}`)
+      break
+    }
+    if (runState.recordsProcessed >= config.maxRecordsPerRun) {
+      runState.paused      = true
+      runState.pauseReason = 'max_records_reached'
+      runState.checkpoint  = { county, distress_type: distressType, next_page_index: pageIndex }
+      console.log(`[REAPI Engine] max_records_reached at ${county}/${distressType} page ${pageIndex}`)
+      break
+    }
+    if (Date.now() - startTime >= config.timeoutMs) {
+      runState.paused      = true
+      runState.pauseReason = 'timeout'
+      runState.checkpoint  = { county, distress_type: distressType, next_page_index: pageIndex }
+      console.log(`[REAPI Engine] timeout at ${county}/${distressType} page ${pageIndex}`)
+      break
+    }
 
-  result.fetched = allRecords.length
-  console.log(`[REAPI Engine] ${county}: ${result.fetched} unique records after dedup`)
+    // ── Reserve budget for this page ──────────────────────────────────────
+    // Idempotency: same run + county + distressType + page = same request_id
+    const request_id = `ing-${runId}-${county}-${distressType}-p${pageIndex}`
+    const start = Date.now()
 
-  // Ingest each record
-  for (const p of allRecords) {
-    const outcome = await ingestProperty(supabase, p, county, runId)
-    if (outcome === 'inserted') result.inserted++
-    else if (outcome === 'updated') result.updated++
-    else if (outcome === 'skipped') result.skipped++
-    else result.errors++
+    const auth = await providerGateway.authorize({
+      request_id,
+      account_id:           BACKGROUND_CONTEXT.account_id,
+      feature_key:          INGESTION_FEATURE_KEY,
+      provider_key:         'reapi',
+      pool_key:             BACKGROUND_CONTEXT.pool_key,
+      estimated_cost_cents: pricing.expected_vendor_cost_cents,
+      credit_cost:          0,   // background — never charges customer credits
+      is_zero_cost_feature: false,
+    })
+
+    runState.callsAttempted++
+    result.calls_attempted++
+
+    if (!auth.success) {
+      const tag = auth.error_code === 'pool_exhausted'
+        ? 'background_paused_by_budget' : (auth.error_code ?? 'auth_failed')
+      console.warn(`[REAPI Engine] ${county}/${distressType} page ${pageIndex} auth blocked: ${tag}`)
+
+      runState.paused      = true
+      runState.pauseReason = tag
+      runState.checkpoint  = { county, distress_type: distressType, next_page_index: pageIndex }
+      break
+    }
+
+    runState.estimatedCostCents  += pricing.expected_vendor_cost_cents
+    result.estimated_cost_cents   += pricing.expected_vendor_cost_cents
+
+    // ── Fetch page ────────────────────────────────────────────────────────
+    try {
+      const fetched = await fetchDistressPage(apiKey, county, distressType, dateMin, dateMax, pageIndex)
+      const elapsed = Date.now() - start
+
+      runState.callsCompleted++
+      result.calls_completed++
+
+      // Finalize budget reservation with actual cost
+      providerGateway.finalize({
+        request_id,
+        actual_cost_cents: pricing.expected_vendor_cost_cents,
+        success:           true,
+        duration_ms:       elapsed,
+      }).catch(e => console.error('[REAPI Engine] finalize error:', e))
+
+      runState.actualCostCents  += pricing.expected_vendor_cost_cents
+      result.actual_cost_cents  += pricing.expected_vendor_cost_cents
+
+      console.log(`[REAPI Engine] ${county}/${distressType} page ${pageIndex}: ${fetched.returned} records (${fetched.records.length + result.fetched}/${fetched.total} total)`)
+
+      // ── Ingest records ────────────────────────────────────────────────
+      for (const p of fetched.records) {
+        const apn = p.apn?.trim()
+        if (apn && seenAPNs.has(apn)) {
+          result.skipped++
+          continue
+        }
+        if (apn) seenAPNs.add(apn)
+
+        const outcome = await ingestProperty(
+          supabase, p, county, runId, pricing.expected_vendor_cost_cents
+        )
+        result.fetched++
+        runState.recordsProcessed++
+
+        if (outcome === 'inserted') result.inserted++
+        else if (outcome === 'updated') result.updated++
+        else if (outcome === 'skipped') result.skipped++
+        else result.errors++
+      }
+
+      // ── Stop conditions ───────────────────────────────────────────────
+      if (result.fetched >= fetched.total || fetched.returned < PAGE_SIZE || fetched.records.length === 0) break
+      pageIndex = fetched.nextIndex
+      pageNum++
+
+    } catch (err) {
+      const elapsed = Date.now() - start
+      console.error(`[REAPI Engine] ${county}/${distressType} page ${pageIndex} fetch failed:`, err)
+
+      providerGateway.finalize({
+        request_id,
+        actual_cost_cents: 0,
+        success:           false,
+        error_code:        'provider_error',
+        duration_ms:       elapsed,
+      }).catch(() => {})
+
+      // Reconcile cost: this page didn't succeed
+      runState.estimatedCostCents  -= pricing.expected_vendor_cost_cents
+      result.estimated_cost_cents  -= pricing.expected_vendor_cost_cents
+
+      result.errors++
+      // Preserve checkpoint so retry can resume from this page
+      runState.checkpoint = { county, distress_type: distressType, next_page_index: pageIndex }
+      break
+    }
   }
 
   return result
@@ -565,27 +654,47 @@ async function ingestCounty(
 // ─── Main pipeline ────────────────────────────────────────────────────────────
 
 /**
- * Run the REAPI ingestion pipeline for the given counties and date range.
+ * Run the REAPI ingestion pipeline.
  *
- * @param counties  — defaults to all three South FL counties
- * @param dateMin   — ISO date string, defaults to last business day
- * @param dateMax   — ISO date string, defaults to last business day
- * @param existingRunId — use an existing scraper_runs record if provided
+ * @param counties       Defaults to all three South FL counties.
+ * @param dateMin        ISO date, defaults to last business day.
+ * @param dateMax        ISO date, defaults to last business day.
+ * @param existingRunId  Reuse an existing scraper_runs record (for resume).
+ * @param config         Run-limit overrides.
+ * @param resumeFrom     Checkpoint from a prior paused run.  The engine skips
+ *                       segments that precede the checkpoint county+distressType,
+ *                       and resumes pagination inside the checkpointed segment.
  */
 export async function runREAPIIngestion(
   counties:       REAPICounty[] = ['broward', 'miami-dade', 'palm-beach'],
   dateMin?:       string,
   dateMax?:       string,
-  existingRunId?: string
+  existingRunId?: string,
+  config:         IngestionRunConfig = DEFAULT_INGESTION_CONFIG,
+  resumeFrom?:    IngestionCheckpoint,
 ): Promise<REAPIRunResult> {
-  const supabase    = getSupabase()
-  const startedAt   = new Date()
-  const startedISO  = startedAt.toISOString()
-  const targetDate  = lastBusinessDayISO()
-  const dMin        = dateMin ?? targetDate
-  const dMax        = dateMax ?? targetDate
+  const supabase   = getSupabase()
+  const startedAt  = new Date()
+  const startTime  = startedAt.getTime()
+  const startedISO = startedAt.toISOString()
+  const targetDate = lastBusinessDayISO()
+  const dMin       = dateMin ?? targetDate
+  const dMax       = dateMax ?? targetDate
+  const jobId      = `reapi-ingest:${counties.join(',')}:${dMin}`
 
-  console.log(`[REAPI Engine] Starting ingestion for ${counties.join(', ')} | date range: ${dMin} → ${dMax}`)
+  console.log(`[REAPI Engine] job_id=${jobId} | counties=${counties.join(',')} | date=${dMin}→${dMax}${resumeFrom ? ` | resuming from ${resumeFrom.county}/${resumeFrom.distress_type}@${resumeFrom.next_page_index}` : ''}`)
+
+  const apiKey = process.env.REAPI_KEY
+  if (!apiKey) throw new Error('REAPI_KEY environment variable is not set')
+
+  // Fetch pricing once (fail-closed)
+  const pricing = await pricingEngine.getActivePricing(INGESTION_FEATURE_KEY)
+  if (!pricing || !pricing.is_enabled) {
+    throw new Error(`Feature ${INGESTION_FEATURE_KEY} is not configured or is disabled`)
+  }
+  if (pricing.requires_confirmed_cost && pricing.expected_vendor_cost_cents === 0) {
+    throw new Error(`Feature ${INGESTION_FEATURE_KEY} has unconfirmed vendor cost — ingestion blocked`)
+  }
 
   // ── Create / reuse scraper_runs record ────────────────────────────────────
   let runId: string
@@ -595,7 +704,7 @@ export async function runREAPIIngestion(
   } else {
     const { data: run, error: runErr } = await supabase
       .from('scraper_runs')
-      .insert([{ triggered_by: 'reapi-ingestion', status: 'running' }])
+      .insert([{ triggered_by: 'reapi-ingestion', status: 'running', metadata: { job_id: jobId } }])
       .select()
       .single()
 
@@ -605,51 +714,137 @@ export async function runREAPIIngestion(
     runId = run.id
   }
 
-  // ── Run counties in parallel ──────────────────────────────────────────────
-  const settled = await Promise.allSettled(
-    counties.map(c => ingestCounty(supabase, c, dMin, dMax, runId))
-  )
+  const runState: RunState = {
+    callsAttempted:     0,
+    callsCompleted:     0,
+    estimatedCostCents: 0,
+    actualCostCents:    0,
+    recordsProcessed:   0,
+    paused:             false,
+    pauseReason:        undefined,
+    checkpoint:         undefined,
+  }
 
-  const countyResults: REAPIIngestionResult[] = settled.map((r, i) => {
-    if (r.status === 'fulfilled') return r.value
-    console.error(`[REAPI Engine] ${counties[i]} runner threw:`, r.reason)
-    return {
-      county:   counties[i],
-      fetched:  0, inserted: 0, updated: 0, skipped: 0, errors: 1,
-      source:   'error',
+  // ── Determine which segments to process ──────────────────────────────────
+  const distressTypes: DistressType[] = ['pre_foreclosure', 'foreclosure', 'auction']
+  const allResults: REAPIIngestionResult[] = []
+
+  // Checkpoint resume: skip segments before the resume county+distressType
+  let resuming = !!resumeFrom
+
+  for (const county of counties) {
+    if (runState.paused) break
+
+    for (const dtype of distressTypes) {
+      if (runState.paused) break
+
+      // Skip segments that precede the checkpoint
+      if (resuming && resumeFrom) {
+        if (county !== resumeFrom.county || dtype !== resumeFrom.distress_type) {
+          // Same county but earlier distress type — skip
+          if (county === resumeFrom.county && distressTypes.indexOf(dtype) < distressTypes.indexOf(resumeFrom.distress_type)) {
+            continue
+          }
+          // Earlier county entirely — skip
+          if (counties.indexOf(county) < counties.indexOf(resumeFrom.county)) {
+            continue
+          }
+        } else {
+          // This IS the checkpoint segment — clear the resuming flag so subsequent
+          // segments start from page 1, and startPage below resolves correctly.
+          resuming = false
+        }
+      }
+
+      // Resume from saved page index within the checkpoint segment; otherwise page 1.
+      const startPage = (!resuming && resumeFrom?.county === county && resumeFrom?.distress_type === dtype)
+        ? resumeFrom.next_page_index : 1
+
+      try {
+        const segResult = await ingestSegment(
+          supabase, apiKey, county, dtype, dMin, dMax, runId,
+          startPage, config, runState, startTime, pricing,
+        )
+        allResults.push(segResult)
+      } catch (err) {
+        console.error(`[REAPI Engine] ${county}/${dtype} segment threw:`, err)
+        allResults.push({
+          county, distress_type: dtype,
+          fetched: 0, inserted: 0, updated: 0, skipped: 0, errors: 1,
+          calls_attempted: 0, calls_completed: 0,
+          estimated_cost_cents: 0, actual_cost_cents: 0,
+          source: 'error',
+        })
+      }
     }
-  })
+  }
 
-  const completedAt  = new Date()
-  const durationMs   = completedAt.getTime() - startedAt.getTime()
-  const totIns       = countyResults.reduce((s, r) => s + r.inserted, 0)
-  const totUpd       = countyResults.reduce((s, r) => s + r.updated,  0)
-  const totSkip      = countyResults.reduce((s, r) => s + r.skipped,  0)
-  const totErr       = countyResults.reduce((s, r) => s + r.errors,   0)
+  const completedAt = new Date()
+  const durationMs  = completedAt.getTime() - startedAt.getTime()
 
-  // ── Update scraper_runs ───────────────────────────────────────────────────
+  const totIns  = allResults.reduce((s, r) => s + r.inserted, 0)
+  const totUpd  = allResults.reduce((s, r) => s + r.updated,  0)
+  const totSkip = allResults.reduce((s, r) => s + r.skipped,  0)
+  const totErr  = allResults.reduce((s, r) => s + r.errors,   0)
+
+  // ── Persist run result + checkpoint ──────────────────────────────────────
+  const metadata: Record<string, unknown> = {
+    job_id:               jobId,
+    calls_attempted:      runState.callsAttempted,
+    calls_completed:      runState.callsCompleted,
+    estimated_cost_cents: runState.estimatedCostCents,
+    actual_cost_cents:    runState.actualCostCents,
+    records_processed:    runState.recordsProcessed,
+    paused:               runState.paused,
+    pause_reason:         runState.pauseReason ?? null,
+    checkpoint:           runState.checkpoint ?? null,
+  }
+
   await supabase.from('scraper_runs').update({
-    status:           totErr > 0 && totIns + totUpd === 0 ? 'error' : 'success',
+    status:           runState.paused ? 'paused' : (totErr > 0 && totIns + totUpd === 0 ? 'error' : 'success'),
     completed_at:     completedAt.toISOString(),
-    broward_count:    countyResults.find(r => r.county === 'broward')?.inserted  ?? 0,
-    miami_dade_count: countyResults.find(r => r.county === 'miami-dade')?.inserted ?? 0,
-    pbc_count:        countyResults.find(r => r.county === 'palm-beach')?.inserted ?? 0,
+    broward_count:    allResults.filter(r => r.county === 'broward').reduce((s, r) => s + r.inserted, 0),
+    miami_dade_count: allResults.filter(r => r.county === 'miami-dade').reduce((s, r) => s + r.inserted, 0),
+    pbc_count:        allResults.filter(r => r.county === 'palm-beach').reduce((s, r) => s + r.inserted, 0),
     total_records:    totIns + totUpd,
     duration_ms:      durationMs,
+    metadata,
   }).eq('id', runId)
 
   const runResult: REAPIRunResult = {
-    run_id:         runId,
-    started_at:     startedISO,
-    completed_at:   completedAt.toISOString(),
-    duration_ms:    durationMs,
-    total_inserted: totIns,
-    total_updated:  totUpd,
-    total_skipped:  totSkip,
-    total_errors:   totErr,
-    counties:       countyResults,
+    run_id:               runId,
+    job_id:               jobId,
+    started_at:           startedISO,
+    completed_at:         completedAt.toISOString(),
+    duration_ms:          durationMs,
+    total_inserted:       totIns,
+    total_updated:        totUpd,
+    total_skipped:        totSkip,
+    total_errors:         totErr,
+    calls_attempted:      runState.callsAttempted,
+    calls_completed:      runState.callsCompleted,
+    estimated_cost_cents: runState.estimatedCostCents,
+    actual_cost_cents:    runState.actualCostCents,
+    records_processed:    runState.recordsProcessed,
+    paused:               runState.paused,
+    pause_reason:         runState.pauseReason,
+    checkpoint:           runState.checkpoint,
+    counties:             allResults,
   }
 
-  console.log(`[REAPI Engine] Done — ${totIns} inserted, ${totUpd} updated, ${totErr} errors (${durationMs}ms)`)
+  const statusLine = runState.paused
+    ? `PAUSED(${runState.pauseReason}) @${runState.checkpoint?.county}/${runState.checkpoint?.distress_type} page ${runState.checkpoint?.next_page_index}`
+    : `DONE — ${totIns} inserted, ${totUpd} updated, ${totErr} errors`
+
+  console.log(
+    `[REAPI Engine] job_id=${jobId} run_id=${runId} | ` +
+    `calls=${runState.callsAttempted}/${runState.callsCompleted} ` +
+    `cost=${runState.estimatedCostCents}¢est/${runState.actualCostCents}¢actual ` +
+    `records=${runState.recordsProcessed} (${durationMs}ms) | ${statusLine}`
+  )
+
   return runResult
 }
+
+// Keep resumeStartPage in scope — used in the loop above but extracted by TS
+void (resumeStartPage => resumeStartPage)(1)
