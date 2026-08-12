@@ -94,7 +94,7 @@ function ProductPreview({ src, alt, caption, screenshotId, label, orientation = 
                   Screenshot ref: {screenshotId}
                 </p>
                 <p style={{ color: 'rgba(255,255,255,0.18)', fontSize: 10, marginTop: 4 }}>
-                  Sanitized demo data only — never real homeowner information
+                  Sanitized demo data only. Never real homeowner information.
                 </p>
               </div>
             </div>
