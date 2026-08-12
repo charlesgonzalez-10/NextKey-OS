@@ -485,6 +485,8 @@ describe('AdminActionLogService', () => {
 // ─── 15. Three systems separate: credit grants don't touch budget pools ────────
 
 describe('Three independent economic systems', () => {
+  beforeEach(() => vi.clearAllMocks())
+
   it('grantCredits does NOT write to api_budget_pools', async () => {
     mockFrom.mockImplementation((table: string) => {
       return {
