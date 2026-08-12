@@ -2,6 +2,11 @@
 
 import { Fragment, useEffect, useState } from 'react'
 import Link from 'next/link'
+import {
+  Home, ClipboardList, Key, Users,
+  Search, Lightbulb, Briefcase, TrendingUp, MapPin,
+  FileText, PenLine, BarChart3, Mail, Zap, Building2,
+} from 'lucide-react'
 import { platform } from '@/content/platform-marketing'
 
 // ── Scroll-reveal hook ────────────────────────────────────────────────────────
@@ -405,7 +410,7 @@ function HeroSection() {
               maxWidth: 520,
             }}>
               One workspace for property intelligence, relationship management, and deal
-              execution — from initial search to close. No context lost between systems.
+              execution, from initial search to close. No context lost between systems.
             </p>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
               <a
@@ -446,7 +451,7 @@ function HeroSection() {
             <div style={{ marginTop: 48, display: 'flex', flexWrap: 'wrap', gap: 24 }}>
               {[
                 'Built by working real estate professionals',
-                'Property-first — not lead-first',
+                'Property-first, not lead-first',
                 'One workspace, not ten tools',
               ].map(s => (
                 <div key={s} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -465,7 +470,7 @@ function HeroSection() {
               alt="NextKey OS — Property Workspace"
               screenshotId="01-property-workspace"
               label="Property Workspace"
-              caption="The property workspace — every detail, contact, comp, and document in one place."
+              caption="The property workspace: every detail, contact, comp, and document in one place."
             />
           </div>
         </div>
@@ -487,11 +492,11 @@ function ProblemSection() {
       <div className="nk-reveal" style={{ textAlign: 'center', maxWidth: 680, margin: '0 auto 64px' }}>
         <Eyebrow>The Problem</Eyebrow>
         <h2 style={{ fontSize: 'clamp(28px, 4vw, 46px)', fontWeight: 800, color: '#0A1F44', lineHeight: 1.15, letterSpacing: '-0.025em', marginBottom: 20 }}>
-          Real estate shouldn&apos;t require ten disconnected tools.
+          Real Estate Shouldn&apos;t Require Ten Disconnected Tools.
         </h2>
         <p style={{ fontSize: 16, color: '#4b5563', lineHeight: 1.7 }}>
           The property, the owner, the research, the communication, and the deal live in
-          separate systems. Every time you switch tools you lose context — and losing context
+          separate systems. Every time you switch tools you lose context, and losing context
           means losing deals.
         </p>
       </div>
@@ -532,7 +537,7 @@ function ProblemSection() {
           One {platform.productName} workspace
         </div>
         <p style={{ fontSize: 14, color: '#6b7280', maxWidth: 440, textAlign: 'center', marginTop: 8 }}>
-          Property intelligence, owner research, contact management, and deal execution — connected to the same property record.
+          Property intelligence, owner research, contact management, and deal execution, all connected to the same property record.
         </p>
       </div>
     </Section>
@@ -548,16 +553,16 @@ function WorkspaceSection() {
         <div className="nk-feature-copy">
           <Eyebrow>Core Architecture</Eyebrow>
           <h2 style={{ fontSize: 'clamp(26px, 3.5vw, 42px)', fontWeight: 800, color: '#fff', lineHeight: 1.15, letterSpacing: '-0.025em', marginBottom: 20 }}>
-            One property.<br />One workspace.
+            One Property.<br />One Workspace.
           </h2>
           <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: 16, lineHeight: 1.7, marginBottom: 28 }}>
             A property doesn&apos;t need to become a lead before you can research it. Open any
-            property, review ownership and distress signals, pull comps, enrich details —
-            then decide whether to save and work the opportunity.
+            property, review ownership and distress signals, pull comps, and enrich details.
+            Then decide whether to save and work the opportunity.
           </p>
           <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: 16, lineHeight: 1.7, marginBottom: 36 }}>
             Everything ties back to the property record: notes, contacts, documents,
-            comparable sales, and deal timeline — all in one place.
+            comparable sales, and deal timeline, all in one place.
           </p>
           <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
             {[
@@ -605,7 +610,7 @@ function DiscoverySection() {
         <div className="nk-feature-copy">
           <Eyebrow>Property Discovery</Eyebrow>
           <h2 style={{ fontSize: 'clamp(26px, 3.5vw, 42px)', fontWeight: 800, color: '#0A1F44', lineHeight: 1.15, letterSpacing: '-0.025em', marginBottom: 20 }}>
-            Find opportunities before they become obvious.
+            Find Opportunities Before They Become Obvious.
           </h2>
           <p style={{ color: '#4b5563', fontSize: 16, lineHeight: 1.7, marginBottom: 28 }}>
             Search individual addresses or apply layered criteria to surface distressed,
@@ -651,10 +656,10 @@ function IntelligenceSection() {
       <div style={{ textAlign: 'center', maxWidth: 640, margin: '0 auto 64px' }} className="nk-reveal">
         <Eyebrow light>Property Intelligence</Eyebrow>
         <h2 style={{ fontSize: 'clamp(26px, 3.5vw, 42px)', fontWeight: 800, color: '#fff', lineHeight: 1.15, letterSpacing: '-0.025em', marginBottom: 20 }}>
-          Turn property data into actionable intelligence.
+          Turn Property Data Into Actionable Intelligence.
         </h2>
         <p style={{ color: 'rgba(255,255,255,0.55)', fontSize: 16, lineHeight: 1.7 }}>
-          Pull together ownership, equity, distress, comparables, and history — so you understand what you&apos;re looking at before making contact.
+          Pull together ownership, equity, distress, comparables, and history, so you understand what you&apos;re looking at before making contact.
         </p>
       </div>
       <div className="nk-grid-3 nk-reveal">
@@ -689,7 +694,7 @@ function RelationshipsSection() {
         <div className="nk-feature-copy">
           <Eyebrow>CRM & Relationships</Eyebrow>
           <h2 style={{ fontSize: 'clamp(26px, 3.5vw, 42px)', fontWeight: 800, color: '#0A1F44', lineHeight: 1.15, letterSpacing: '-0.025em', marginBottom: 20 }}>
-            From property research to real relationships.
+            From Property Research to Real Relationships.
           </h2>
           <p style={{ color: '#4b5563', fontSize: 16, lineHeight: 1.7, marginBottom: 28 }}>
             When a researched property becomes worth working, convert it into an active
@@ -758,11 +763,11 @@ function DocumentsSection() {
         <div className="nk-feature-copy">
           <Eyebrow light>Native Documents</Eyebrow>
           <h2 style={{ fontSize: 'clamp(26px, 3.5vw, 42px)', fontWeight: 800, color: '#fff', lineHeight: 1.15, letterSpacing: '-0.025em', marginBottom: 20 }}>
-            Documents where the deal already lives.
+            Documents Where the Deal Already Lives.
           </h2>
           <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: 16, lineHeight: 1.7, marginBottom: 28 }}>
             Generate contracts and documents from templates, assign signer roles,
-            and keep everything tied to the property record — no external service required.
+            and keep everything tied to the property record, with no external service required.
           </p>
           <div style={{
             background: 'rgba(201,168,76,0.08)',
@@ -784,7 +789,7 @@ function DocumentsSection() {
               'Document generation from templates',
               'Variable substitution (property, contact, deal fields)',
               'Document library per property',
-              'Native signer-role assignment — In Development',
+              'Native signer-role assignment (In Development)',
             ].map(item => (
               <li key={item} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
                 <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="#C9A84C" strokeWidth="2.5" aria-hidden="true" style={{ flexShrink: 0, marginTop: 3 }}>
@@ -826,7 +831,7 @@ function WorkflowSection() {
       <div style={{ textAlign: 'center', maxWidth: 600, margin: '0 auto 64px' }} className="nk-reveal">
         <Eyebrow>How It Works</Eyebrow>
         <h2 style={{ fontSize: 'clamp(26px, 3.5vw, 42px)', fontWeight: 800, color: '#0A1F44', lineHeight: 1.15, letterSpacing: '-0.025em', marginBottom: 20 }}>
-          From search to close — without losing the story of the property.
+          From Search to Close, Without Losing the Story of the Property.
         </h2>
         <p style={{ color: '#6b7280', fontSize: 16, lineHeight: 1.7 }}>
           Every step stays connected to the same property record, so context never disappears between phases of the deal.
@@ -874,25 +879,25 @@ function WorkflowSection() {
 // ── Built For ─────────────────────────────────────────────────────────────────
 
 function AudienceSection() {
-  const audiences = [
+  const audiences: { label: string; Icon: React.ElementType; desc: string }[] = [
     {
       label: 'Real Estate Investors',
-      icon: '🏘',
+      Icon: Home,
       desc: 'Find and evaluate opportunities while keeping property intelligence connected to execution. Research distress signals, evaluate comps, and manage deal flow from one place.',
     },
     {
       label: 'Wholesalers',
-      icon: '📋',
+      Icon: ClipboardList,
       desc: 'Research distressed properties, organize opportunities, manage seller contacts, and track assignments through a structured pipeline workflow.',
     },
     {
       label: 'Agents',
-      icon: '🔑',
+      Icon: Key,
       desc: 'Research properties and manage client relationships with deeper property context than any standard CRM provides.',
     },
     {
       label: 'Small Teams',
-      icon: '👥',
+      Icon: Users,
       desc: 'Operate from a shared workspace instead of distributing information across disconnected spreadsheets, inboxes, and CRM tools.',
     },
   ]
@@ -901,7 +906,7 @@ function AudienceSection() {
       <div style={{ textAlign: 'center', maxWidth: 580, margin: '0 auto 64px' }} className="nk-reveal">
         <Eyebrow light>Built For</Eyebrow>
         <h2 style={{ fontSize: 'clamp(26px, 3.5vw, 42px)', fontWeight: 800, color: '#fff', lineHeight: 1.15, letterSpacing: '-0.025em' }}>
-          Professionals who work real estate seriously.
+          Professionals Who Work Real Estate Seriously.
         </h2>
       </div>
       <div className="nk-grid-2 nk-reveal">
@@ -918,7 +923,9 @@ function AudienceSection() {
             onMouseEnter={e => { e.currentTarget.style.borderColor = 'rgba(201,168,76,0.3)'; e.currentTarget.style.background = 'rgba(201,168,76,0.04)' }}
             onMouseLeave={e => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)'; e.currentTarget.style.background = 'rgba(255,255,255,0.04)' }}
           >
-            <div style={{ fontSize: 32, marginBottom: 16 }} role="img" aria-hidden="true">{a.icon}</div>
+            <div style={{ marginBottom: 16 }} aria-hidden="true">
+              <a.Icon size={32} strokeWidth={1.5} color="#C9A84C" />
+            </div>
             <h3 style={{ color: '#fff', fontWeight: 700, fontSize: 18, marginBottom: 12 }}>{a.label}</h3>
             <p style={{ color: 'rgba(255,255,255,0.5)', fontSize: 15, lineHeight: 1.7 }}>{a.desc}</p>
           </div>
@@ -931,19 +938,19 @@ function AudienceSection() {
 // ── Platform Modules ──────────────────────────────────────────────────────────
 
 function ModulesSection() {
-  const modules = [
-    { label: 'Property Search',      icon: '🔍', status: 'live'   },
-    { label: 'Property Intelligence', icon: '🧠', status: 'live'   },
-    { label: 'CRM & Contacts',       icon: '👤', status: 'live'   },
-    { label: 'Deal Workspace',       icon: '📊', status: 'live'   },
-    { label: 'Comparable Sales',     icon: '📈', status: 'live'   },
-    { label: 'Driving for Dollars',  icon: '🗺',  status: 'live'   },
-    { label: 'Documents',            icon: '📄', status: 'live'   },
-    { label: 'E-Signature',          icon: '✍️',  status: 'dev'    },
-    { label: 'Reports & Analytics',  icon: '📉', status: 'live'   },
-    { label: 'Communications',       icon: '📬', status: 'live'   },
-    { label: 'AI Intelligence',      icon: '⚡', status: 'live'   },
-    { label: 'Team Management',      icon: '🏢', status: 'soon'   },
+  const modules: { label: string; Icon: React.ElementType; status: string }[] = [
+    { label: 'Property Search',      Icon: Search,        status: 'live'   },
+    { label: 'Property Intelligence', Icon: Lightbulb,    status: 'live'   },
+    { label: 'CRM & Contacts',       Icon: Users,         status: 'live'   },
+    { label: 'Deal Workspace',       Icon: Briefcase,     status: 'live'   },
+    { label: 'Comparable Sales',     Icon: TrendingUp,    status: 'live'   },
+    { label: 'Driving for Dollars',  Icon: MapPin,        status: 'live'   },
+    { label: 'Documents',            Icon: FileText,      status: 'live'   },
+    { label: 'E-Signature',          Icon: PenLine,       status: 'dev'    },
+    { label: 'Reports & Analytics',  Icon: BarChart3,     status: 'live'   },
+    { label: 'Communications',       Icon: Mail,          status: 'live'   },
+    { label: 'AI Intelligence',      Icon: Zap,           status: 'live'   },
+    { label: 'Team Management',      Icon: Building2,     status: 'soon'   },
   ]
   const statusLabel: Record<string, string> = {
     live: 'Live',
@@ -960,7 +967,7 @@ function ModulesSection() {
       <div style={{ textAlign: 'center', maxWidth: 580, margin: '0 auto 56px' }} className="nk-reveal">
         <Eyebrow>Platform Modules</Eyebrow>
         <h2 style={{ fontSize: 'clamp(26px, 3.5vw, 42px)', fontWeight: 800, color: '#0A1F44', lineHeight: 1.15, letterSpacing: '-0.025em' }}>
-          Everything a real estate operation needs.
+          Everything a Real Estate Operation Needs.
         </h2>
       </div>
       <div className="nk-grid-4 nk-reveal">
@@ -978,7 +985,9 @@ function ModulesSection() {
             onMouseEnter={e => { if (m.status !== 'soon') { e.currentTarget.style.borderColor = '#C9A84C'; e.currentTarget.style.boxShadow = '0 4px 20px rgba(201,168,76,0.1)' } }}
             onMouseLeave={e => { e.currentTarget.style.borderColor = '#e5e7eb'; e.currentTarget.style.boxShadow = 'none' }}
           >
-            <div style={{ fontSize: 24, marginBottom: 10 }} role="img" aria-hidden="true">{m.icon}</div>
+            <div style={{ marginBottom: 10 }} aria-hidden="true">
+              <m.Icon size={22} strokeWidth={1.5} color={m.status === 'soon' ? 'rgba(10,31,68,0.25)' : '#0A1F44'} />
+            </div>
             <p style={{ fontWeight: 700, fontSize: 14, color: '#111827', marginBottom: 6 }}>{m.label}</p>
             <span style={{
               fontSize: 11, fontWeight: 700,
@@ -1002,7 +1011,7 @@ function MissionSection() {
       <div className="nk-reveal" style={{ maxWidth: 720, margin: '0 auto', textAlign: 'center' }}>
         <Eyebrow light>Our Mission</Eyebrow>
         <h2 style={{ fontSize: 'clamp(26px, 3.5vw, 42px)', fontWeight: 800, color: '#fff', lineHeight: 1.15, letterSpacing: '-0.025em', marginBottom: 32 }}>
-          Built from the real problems behind real properties.
+          Built from the Real Problems Behind Real Properties.
         </h2>
         <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: 17, lineHeight: 1.8, marginBottom: 28 }}>
           NextKey began with a simple belief: better information creates better options. After years
@@ -1011,7 +1020,7 @@ function MissionSection() {
         </p>
         <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: 17, lineHeight: 1.8, marginBottom: 28 }}>
           Property data lived in one place. Contacts in another. Documents somewhere else.
-          Critical context disappeared between systems — and with it, the complete picture of
+          Critical context disappeared between systems, and with it, the complete picture of
           what a property and its owner actually needed.
         </p>
         <p style={{ color: 'rgba(255,255,255,0.75)', fontSize: 17, lineHeight: 1.8, fontStyle: 'italic' }}>
@@ -1040,7 +1049,7 @@ function PricingSection() {
       <div style={{ textAlign: 'center', maxWidth: 580, margin: '0 auto 56px' }} className="nk-reveal">
         <Eyebrow>Pricing</Eyebrow>
         <h2 style={{ fontSize: 'clamp(26px, 3.5vw, 42px)', fontWeight: 800, color: '#0A1F44', lineHeight: 1.15, letterSpacing: '-0.025em', marginBottom: 20 }}>
-          Plans for every stage of growth.
+          Plans for Every Stage of Growth.
         </h2>
         <p style={{ color: '#6b7280', fontSize: 16, lineHeight: 1.7 }}>
           Pricing is being finalized as we prepare {platform.productName} for broader access.
@@ -1114,9 +1123,9 @@ function FinalCTASection() {
       }} />
       <div style={{ maxWidth: 680, margin: '0 auto', padding: '0 24px', textAlign: 'center', position: 'relative' }} className="nk-reveal">
         <h2 style={{ color: '#fff', fontSize: 'clamp(28px, 4vw, 50px)', fontWeight: 800, lineHeight: 1.12, letterSpacing: '-0.025em', marginBottom: 20 }}>
-          One place to find it,<br />
-          <span style={{ color: '#C9A84C' }}>understand it,</span><br />
-          and move it forward.
+          One Place to Find It,<br />
+          <span style={{ color: '#C9A84C' }}>Understand It,</span><br />
+          and Move It Forward.
         </h2>
         <p style={{ color: 'rgba(255,255,255,0.55)', fontSize: 17, lineHeight: 1.7, marginBottom: 40, maxWidth: 500, margin: '0 auto 40px' }}>
           Bring property intelligence, relationships, and deal execution into one workspace.
@@ -1208,7 +1217,7 @@ function Footer() {
             © {new Date().getFullYear()} {platform.companyName}. All rights reserved.
           </p>
           <p style={{ color: 'rgba(255,255,255,0.15)', fontSize: 12 }}>
-            {platform.productName} — Private Early Access
+            {platform.productName} · Private Early Access
           </p>
         </div>
       </div>
