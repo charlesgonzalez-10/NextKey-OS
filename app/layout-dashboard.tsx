@@ -85,7 +85,7 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ]
 
-const BOTTOM_NAV_HREFS = ['/', '/leads', '/contacts', '/inbox', '/pipeline']
+const BOTTOM_NAV_HREFS = ['/dashboard', '/leads', '/contacts', '/inbox', '/pipeline']
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -241,7 +241,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }
 
   const isActive = (href: string) => {
-    if (href === '/') return pathname === '/'
+    if (href === '/dashboard') return pathname === '/dashboard'
     if (href === '/property-search') return pathname.startsWith('/property-search')
     if (href === '/leads') return pathname.startsWith('/leads')
     return pathname.startsWith(href.split('?')[0])
@@ -375,7 +375,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   // ── Build mobile-nav items ────────────────────────────────────────────────────
 
   const allItems: NavItem[] = [
-    { label: 'Dashboard', href: '/', icon: Ic.dashboard },
+    { label: 'Dashboard', href: '/dashboard', icon: Ic.dashboard },
     ...NAV_GROUPS.flatMap(g => g.items),
   ]
   const visibleBottom = allItems.filter(i => BOTTOM_NAV_HREFS.includes(i.href))
@@ -399,7 +399,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         {/* Logo + collapse toggle */}
         <div className="flex items-center justify-between px-3 py-4 border-b border-white/10 shrink-0">
           {!collapsed && (
-            <a href="/" className="flex items-center gap-2 min-w-0 no-underline">
+            <a href="/dashboard" className="flex items-center gap-2 min-w-0 no-underline">
               <span style={{ color: '#C9A84C' }} className="text-lg font-bold tracking-tight whitespace-nowrap">NextKey</span>
               <span style={{ backgroundColor: 'rgba(201,168,76,0.2)', color: '#C9A84C' }}
                 className="text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0">OS</span>
@@ -475,7 +475,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           )}
 
           {/* Dashboard — always visible */}
-          <NavLink item={{ label: 'Dashboard', href: '/', icon: Ic.dashboard }} compact={collapsed} showPin={!pinned.includes('/')} />
+          <NavLink item={{ label: 'Dashboard', href: '/dashboard', icon: Ic.dashboard }} compact={collapsed} showPin={!pinned.includes('/dashboard')} />
 
           {/* Category groups */}
           {NAV_GROUPS.map(group => {

@@ -1,16 +1,16 @@
+import type { Metadata } from 'next'
 import { createClient } from '@/lib/supabase/server'
-import { redirect } from 'next/navigation'
-import DashboardLayout from './layout-dashboard'
-import DashboardClient from './dashboard/page-client'
+import LandingPage from './_landing/LandingPage'
 
-export default async function Page() {
+export const metadata: Metadata = {
+  title: 'NextKey | Real Estate Intelligence & Deal Management',
+  description:
+    'A unified real estate platform for property discovery, intelligence, relationship management, and deal execution. Built by NextKey Property Solutions.',
+  robots: 'index, follow',
+}
+
+export default async function HomePage() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect('/login')
-
-  return (
-    <DashboardLayout>
-      <DashboardClient />
-    </DashboardLayout>
-  )
+  return <LandingPage isAuthenticated={!!user} />
 }
