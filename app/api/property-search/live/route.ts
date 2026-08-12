@@ -20,8 +20,9 @@
  *   sort_by: file_date|equity_percentage|market_value  sort_dir: asc|desc
  *   force (skip cache — for testing, admin use)
  *
- * Response:
- *   { properties, total, total_in_market, page, pages, cached, cache_age_seconds, outcome }
+ * Standard response envelope:
+ *   { success, results, count, cached, searchSessionId, pagination, error }
+ *   On success: error is null; on failure: results is [], error has { code, message }.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -45,6 +46,44 @@ function getServiceSupabase() {
 }
 
 const CACHE_TTL_HOURS = 24
+
+// ─── Response helpers ─────────────────────────────────────────────────────────
+
+function ok(
+  results: LiveProperty[],
+  count: number,
+  cached: boolean,
+  searchSessionId: string | null,
+  pagination: { page: number; pageSize: number; totalPages: number } | null,
+  extra: Record<string, unknown> = {},
+) {
+  return NextResponse.json({
+    success:         true,
+    results,
+    count,
+    cached,
+    searchSessionId,
+    pagination,
+    error:           null,
+    ...extra,
+  })
+}
+
+function fail(
+  code: string,
+  message: string,
+  status: number,
+) {
+  return NextResponse.json({
+    success:         false,
+    results:         [],
+    count:           0,
+    cached:          false,
+    searchSessionId: null,
+    pagination:      null,
+    error:           { code, message },
+  }, { status })
+}
 
 // ─── Sort helpers ─────────────────────────────────────────────────────────────
 
@@ -74,189 +113,194 @@ function sortResults(
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 export async function GET(req: NextRequest) {
-  // ── Auth ──────────────────────────────────────────────────────────────────
-  const authClient = await createClient()
-  const { data: { user }, error: authError } = await authClient.auth.getUser()
+  try {
+    // ── Auth ────────────────────────────────────────────────────────────────
+    const authClient = await createClient()
+    const { data: { user }, error: authError } = await authClient.auth.getUser()
 
-  if (authError || !user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+    if (authError || !user) {
+      return fail('unauthorized', 'Unauthorized', 401)
+    }
 
-  const p = req.nextUrl.searchParams
+    const p = req.nextUrl.searchParams
 
-  // Parse pagination / sort (excluded from cache key)
-  const page    = Math.max(1, parseInt(p.get('page')  ?? '1',  10))
-  const limit   = Math.min(parseInt(p.get('limit') ?? '50', 10), 250)
-  const sortBy  = (['file_date','equity_percentage','market_value'].includes(p.get('sort_by') ?? '')
-    ? p.get('sort_by')! : 'file_date') as SortKey
-  const sortDir = p.get('sort_dir') === 'asc' ? 'asc' : 'desc'
-  const force   = p.get('force') === 'true'
+    // Parse pagination / sort (excluded from cache key)
+    const page       = Math.max(1, parseInt(p.get('page')  ?? '1',  10))
+    const limit      = Math.min(parseInt(p.get('limit') ?? '50', 10), 250)
+    const sortBy     = (['file_date','equity_percentage','market_value'].includes(p.get('sort_by') ?? '')
+      ? p.get('sort_by')! : 'file_date') as SortKey
+    const sortDir    = p.get('sort_dir') === 'asc' ? 'asc' : 'desc'
+    const force      = p.get('force') === 'true'
+    // refresh_gen: 0 = ordinary request/retry (idempotent); 1+ = explicit "Refresh Results"
+    // (new billing_request_id, skip cache). Clamped to 0-100 to prevent runaway spend.
+    const refreshGen = Math.min(100, Math.max(0, parseInt(p.get('refresh_gen') ?? '0', 10) || 0))
 
-  // Build search params (everything except page/sort)
-  const search: SearchParams = {
-    search:      p.get('search')       ?? undefined,
-    county:      p.get('county')       ?? undefined,
-    city:        p.get('city')         ?? undefined,
-    zip:         p.get('zip')          ?? undefined,
-    zone:        p.get('zone')         ?? undefined,
-    lead_types:  p.get('lead_types')   ?? undefined,
-    equity:      p.get('equity')       ?? undefined,
-    value_min:   p.get('value_min')    ?? undefined,
-    value_max:   p.get('value_max')    ?? undefined,
-    beds_min:    p.get('beds_min')     ?? undefined,
-    beds_max:    p.get('beds_max')     ?? undefined,
-    baths_min:   p.get('baths_min')    ?? undefined,
-    baths_max:   p.get('baths_max')    ?? undefined,
-    year_min:    p.get('year_min')     ?? undefined,
-    year_max:    p.get('year_max')     ?? undefined,
-    file_from:   p.get('file_from')    ?? undefined,
-    file_to:     p.get('file_to')      ?? undefined,
-    homestead:   p.get('homestead')    ?? undefined,
-    out_of_state: p.get('out_of_state') ?? undefined,
-  }
+    // Build search params (everything except page/sort)
+    const search: SearchParams = {
+      search:      p.get('search')       ?? undefined,
+      county:      p.get('county')       ?? undefined,
+      city:        p.get('city')         ?? undefined,
+      zip:         p.get('zip')          ?? undefined,
+      zone:        p.get('zone')         ?? undefined,
+      lead_types:  p.get('lead_types')   ?? undefined,
+      equity:      p.get('equity')       ?? undefined,
+      value_min:   p.get('value_min')    ?? undefined,
+      value_max:   p.get('value_max')    ?? undefined,
+      beds_min:    p.get('beds_min')     ?? undefined,
+      beds_max:    p.get('beds_max')     ?? undefined,
+      baths_min:   p.get('baths_min')    ?? undefined,
+      baths_max:   p.get('baths_max')    ?? undefined,
+      year_min:    p.get('year_min')     ?? undefined,
+      year_max:    p.get('year_max')     ?? undefined,
+      file_from:   p.get('file_from')    ?? undefined,
+      file_to:     p.get('file_to')      ?? undefined,
+      homestead:   p.get('homestead')    ?? undefined,
+      out_of_state: p.get('out_of_state') ?? undefined,
+    }
 
-  // Require at least one meaningful filter
-  const hasFilter = Object.values(search).some(v => v !== undefined && v !== '')
-  if (!hasFilter) {
-    return NextResponse.json(
-      { error: 'At least one search filter is required (county, city, zip, address, or zone)' },
-      { status: 400 }
+    // Require at least one meaningful filter
+    const hasFilter = Object.values(search).some(v => v !== undefined && v !== '')
+    if (!hasFilter) {
+      return fail(
+        'missing_filter',
+        'At least one search filter is required (county, city, zip, address, or zone)',
+        400
+      )
+    }
+
+    const supabase = getServiceSupabase()
+    const cacheKey = buildCacheKey(search)
+    const now      = new Date()
+
+    // ── Check cache (skip if force=true or explicit refresh) ─────────────
+    // refresh_gen > 0 means the user explicitly requested fresh data.
+    // Skipping cache here ensures they get a live provider call and a new
+    // billing_request_id — even if a stale entry exists.
+    if (!force && refreshGen === 0) {
+      const { data: cached } = await supabase
+        .from('search_cache')
+        .select('id, results, result_count, created_at, expires_at')
+        .eq('search_hash', cacheKey)
+        .gt('expires_at', now.toISOString())
+        .maybeSingle()
+
+      if (cached) {
+        const allResults    = cached.results as LiveProperty[]
+        const cacheAgeSecs  = Math.floor((now.getTime() - new Date(cached.created_at).getTime()) / 1000)
+        const sorted        = sortResults(allResults, sortBy, sortDir)
+        const totalPages    = Math.max(1, Math.ceil(sorted.length / limit))
+        const slice         = sorted.slice((page - 1) * limit, page * limit)
+        const sessionId     = `${cacheKey.slice(0, 16)}-cache`
+
+        console.log(`[LiveSearch] Cache HIT — user=${user.id} key=${cacheKey} age=${cacheAgeSecs}s results=${allResults.length}`)
+
+        return ok(slice, sorted.length, true, sessionId, { page, pageSize: limit, totalPages }, {
+          total_in_market:   cached.result_count,
+          cache_age_seconds: cacheAgeSecs,
+          cache_key:         cacheKey,
+          outcome:           'cache_hit',
+        })
+      }
+    }
+
+    // ── Cache miss — call REAPI through gateway ────────────────────────────
+    // logicalSearchId = cacheKey: stable per (user, search params, UTC day).
+    // billing_request_id inside executeGatewaySearch is derived from this — same
+    // user + same params + same page + same day always produce the same request_id,
+    // preventing double-charges on retried requests.
+    // attemptId = random UUID per HTTP invocation for logging/tracing only;
+    // it is never used as a billing key.
+    const billing         = buildCustomerContext(user.id)
+    const { randomUUID }  = await import('crypto')
+    const logicalSearchId = cacheKey
+    const attemptId       = randomUUID()
+
+    console.log(
+      `[LiveSearch] Cache MISS — user=${user.id} key=${cacheKey} ` +
+      `attempt=${attemptId} refresh_gen=${refreshGen}`
     )
-  }
 
-  const supabase = getServiceSupabase()
-  const cacheKey = buildCacheKey(search)
-  const now      = new Date()
+    const gatewayResult = await executeGatewaySearch(search, billing, logicalSearchId, undefined, attemptId, refreshGen)
 
-  // ── Check cache (skip if force=true) ────────────────────────────────────
-  if (!force) {
-    const { data: cached } = await supabase
-      .from('search_cache')
-      .select('id, results, result_count, created_at, expires_at')
-      .eq('search_hash', cacheKey)
-      .gt('expires_at', now.toISOString())
-      .maybeSingle()
+    // ── Map gateway outcome to HTTP ────────────────────────────────────────
+    if (gatewayResult.outcome === 'credit_insufficient') {
+      return fail('credit_insufficient', 'Insufficient credits to perform this search.', 402)
+    }
 
-    if (cached) {
-      const allResults    = cached.results as LiveProperty[]
-      const cacheAgeSecs  = Math.floor((now.getTime() - new Date(cached.created_at).getTime()) / 1000)
-      const sorted        = sortResults(allResults, sortBy, sortDir)
-      const pages         = Math.max(1, Math.ceil(sorted.length / limit))
-      const slice         = sorted.slice((page - 1) * limit, page * limit)
+    if (
+      gatewayResult.outcome === 'customer_pool_exhausted' ||
+      gatewayResult.outcome === 'account_capacity_limit' ||
+      gatewayResult.outcome === 'global_budget_exhausted'
+    ) {
+      return fail('budget_exhausted', 'Search budget limit reached. Please try again later.', 402)
+    }
 
-      console.log(`[LiveSearch] Cache HIT — user=${user.id} key=${cacheKey} age=${cacheAgeSecs}s`)
+    if (
+      gatewayResult.outcome === 'provider_disabled' ||
+      gatewayResult.outcome === 'feature_disabled' ||
+      gatewayResult.outcome === 'authorization_unavailable'
+    ) {
+      // Surface safe_message when available (e.g. REAPI wallet insufficient error)
+      const safeMsg = ('safe_message' in gatewayResult && gatewayResult.safe_message)
+        ? gatewayResult.safe_message
+        : 'Live search is temporarily unavailable.'
+      return fail('provider_unavailable', safeMsg, 503)
+    }
 
-      return NextResponse.json({
-        properties:        slice,
-        total:             sorted.length,
-        total_in_market:   cached.result_count,
-        page,
-        pages,
-        limit,
-        cached:            true,
-        cache_age_seconds: cacheAgeSecs,
-        cache_key:         cacheKey,
-        outcome:           'cache_hit',
+    if (gatewayResult.outcome === 'provider_failed') {
+      return fail('provider_error', 'Provider temporarily unavailable.', 502)
+    }
+
+    // success or partial_result
+    if (!('properties' in gatewayResult)) {
+      return fail('search_unavailable', 'Search unavailable', 503)
+    }
+
+    const allResults = gatewayResult.properties
+    const total      = gatewayResult.total
+    const isPartial  = gatewayResult.outcome === 'partial_result'
+
+    // ── Store in cache (fire-and-forget; don't cache partial results) ──────
+    if (!isPartial && allResults.length > 0) {
+      const expiresAt = new Date(now.getTime() + CACHE_TTL_HOURS * 60 * 60 * 1000)
+      supabase.from('search_cache').upsert({
+        search_hash:  cacheKey,
+        query_params: search,
+        results:      allResults,
+        result_count: total,
+        created_at:   now.toISOString(),
+        expires_at:   expiresAt.toISOString(),
+        hit_count:    0,
+      }, { onConflict: 'search_hash' }).then(({ error }) => {
+        if (error) console.error('[LiveSearch] Cache write error:', error.message)
+        else console.log(`[LiveSearch] Cached ${allResults.length} results (expires ${expiresAt.toISOString()})`)
       })
     }
-  }
 
-  // ── Cache miss — call REAPI through gateway ──────────────────────────────
-  const billing          = buildCustomerContext(user.id)
-  const searchSessionId  = `${cacheKey.slice(0, 16)}-${Math.floor(Date.now() / 60_000)}`
+    // ── Sort and paginate ────────────────────────────────────────────────
+    const sorted     = sortResults(allResults, sortBy, sortDir)
+    const totalPages = Math.max(1, Math.ceil(sorted.length / limit))
+    const slice      = sorted.slice((page - 1) * limit, page * limit)
 
-  console.log(`[LiveSearch] Cache MISS — user=${user.id} key=${cacheKey} session=${searchSessionId}`)
+    console.log(`[LiveSearch] Search complete — user=${user.id} outcome=${gatewayResult.outcome} results=${sorted.length} pages=${totalPages} partial=${isPartial}`)
 
-  const gatewayResult = await executeGatewaySearch(search, billing, searchSessionId)
-
-  // ── Map gateway outcome to HTTP ──────────────────────────────────────────
-  if (gatewayResult.outcome === 'credit_insufficient') {
-    return NextResponse.json({
-      error:       'Insufficient credits to perform this search.',
-      outcome:     gatewayResult.outcome,
-      safe_message: (gatewayResult as { safe_message?: string }).safe_message,
-    }, { status: 402 })
-  }
-
-  if (
-    gatewayResult.outcome === 'customer_pool_exhausted' ||
-    gatewayResult.outcome === 'account_capacity_limit' ||
-    gatewayResult.outcome === 'global_budget_exhausted'
-  ) {
-    return NextResponse.json({
-      error:       'Search budget limit reached. Please try again later.',
-      outcome:     gatewayResult.outcome,
-      safe_message: (gatewayResult as { safe_message?: string }).safe_message,
-    }, { status: 402 })
-  }
-
-  if (
-    gatewayResult.outcome === 'provider_disabled' ||
-    gatewayResult.outcome === 'feature_disabled' ||
-    gatewayResult.outcome === 'authorization_unavailable'
-  ) {
-    return NextResponse.json({
-      error:       'Live search is temporarily unavailable.',
-      outcome:     gatewayResult.outcome,
-      safe_message: (gatewayResult as { safe_message?: string }).safe_message,
-    }, { status: 503 })
-  }
-
-  if (gatewayResult.outcome === 'provider_failed') {
-    return NextResponse.json({
-      error:       'Provider temporarily unavailable.',
-      outcome:     gatewayResult.outcome,
-      safe_message: (gatewayResult as { safe_message?: string }).safe_message,
-    }, { status: 502 })
-  }
-
-  // success or partial_result — both union members have properties/total/pages_fetched.
-  // All error outcomes were returned above; this guard is a safety net for TS.
-  if (!('properties' in gatewayResult)) {
-    return NextResponse.json({ error: 'Search unavailable' }, { status: 503 })
-  }
-
-  const allResults = gatewayResult.properties
-  const total      = gatewayResult.total
-  const isPartial  = gatewayResult.outcome === 'partial_result'
-
-  // ── Store in cache (fire-and-forget; don't cache partial results) ────────
-  if (!isPartial && allResults.length > 0) {
-    const expiresAt = new Date(now.getTime() + CACHE_TTL_HOURS * 60 * 60 * 1000)
-    supabase.from('search_cache').upsert({
-      search_hash:  cacheKey,
-      query_params: search,
-      results:      allResults,
-      result_count: total,
-      created_at:   now.toISOString(),
-      expires_at:   expiresAt.toISOString(),
-      hit_count:    0,
-    }, { onConflict: 'search_hash' }).then(({ error }) => {
-      if (error) console.error('[LiveSearch] Cache write error:', error.message)
-      else console.log(`[LiveSearch] Cached ${allResults.length} results (expires ${expiresAt.toISOString()})`)
+    return ok(slice, sorted.length, false, attemptId, { page, pageSize: limit, totalPages }, {
+      total_in_market: total,
+      cache_key:       cacheKey,
+      outcome:         gatewayResult.outcome,
+      pages_fetched:   gatewayResult.pages_fetched,
+      ...(isPartial ? {
+        partial:        true,
+        partial_reason: (gatewayResult as { error_code?: string }).error_code,
+      } : {}),
     })
+
+  } catch (err) {
+    const msg   = err instanceof Error ? err.message : String(err)
+    const stack = err instanceof Error ? err.stack  : undefined
+    console.error('[LiveSearch] UNHANDLED EXCEPTION — type:', err instanceof Error ? err.constructor.name : typeof err)
+    console.error('[LiveSearch] UNHANDLED EXCEPTION — message:', msg)
+    if (stack) console.error('[LiveSearch] UNHANDLED EXCEPTION — stack:', stack)
+    return fail('server_error', 'Search temporarily unavailable. Please try again.', 500)
   }
-
-  // ── Sort and paginate ────────────────────────────────────────────────────
-  const sorted = sortResults(allResults, sortBy, sortDir)
-  const pages  = Math.max(1, Math.ceil(sorted.length / limit))
-  const slice  = sorted.slice((page - 1) * limit, page * limit)
-
-  return NextResponse.json({
-    properties:       slice,
-    total:            sorted.length,
-    total_in_market:  total,
-    page,
-    pages,
-    limit,
-    cached:           false,
-    cache_age_seconds: 0,
-    cache_key:        cacheKey,
-    outcome:          gatewayResult.outcome,
-    pages_fetched:    gatewayResult.pages_fetched,
-    ...(isPartial ? {
-      partial:       true,
-      partial_reason: (gatewayResult as { error_code?: string }).error_code,
-    } : {}),
-  })
 }

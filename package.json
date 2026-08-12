@@ -32,6 +32,7 @@
     "react-dom": "19.2.4",
     "resend": "^6.12.2",
     "ssh2-sftp-client": "^12.1.1",
+    "stripe": "^22.4.0",
     "twilio": "^6.0.2"
   },
   "devDependencies": {
@@ -43,6 +44,7 @@
     "@vitest/ui": "^4.1.10",
     "eslint": "^9",
     "eslint-config-next": "16.2.4",
+    "pg": "^8.22.0",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.10"

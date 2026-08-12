@@ -32,6 +32,32 @@ interface AdminStats {
     ai_replies_30d?: number
     error?: string
   }
+  billing: {
+    pools?: Array<{
+      pool_key:               string
+      pool_name?:             string | null
+      monthly_limit_cents:    number
+      spent_this_period_cents: number
+      utilization_pct:        number
+      is_protected:           boolean
+      is_active:              boolean
+    }>
+    usage_this_period?: {
+      total_events:    number
+      total_cost_cents: number
+      by_provider: Array<{ provider_key: string; events: number; cost_cents: number }>
+    }
+    active_reservations?: {
+      count:               number
+      total_reserved_cents: number
+    }
+    credit_overview?: {
+      total_wallets:           number
+      total_available_credits: number
+      total_reserved_credits:  number
+    }
+    error?: string
+  }
   env: Record<string, boolean>
 }
 
@@ -51,6 +77,11 @@ function timeAgo(iso: string | null | undefined): string {
 function fmt$(n: number | undefined): string {
   if (n == null) return '—'
   return `$${n.toFixed(4)}`
+}
+
+function fmtCents(cents: number | undefined): string {
+  if (cents == null) return '—'
+  return `$${(cents / 100).toFixed(2)}`
 }
 
 function fmtNum(n: number | undefined): string {
@@ -224,6 +255,79 @@ export default function AdminClient() {
             <StatCard label="OAuth Tokens"   value={fmtNum(stats.db.oauth_tokens)}    status={stats.db.oauth_tokens > 0 ? 'ok' : 'neutral'} sub="connected accounts" />
           </Section>
 
+          {/* ── API Budget Pools ── */}
+          {stats.billing?.error ? (
+            <Section title="API Budget">
+              <StatCard label="Billing" value="Unavailable" sub={stats.billing.error} status="error" />
+            </Section>
+          ) : stats.billing?.pools ? (
+            <Section title="API Budget — This Month">
+              {stats.billing.pools.map(pool => (
+                <StatCard
+                  key={pool.pool_key}
+                  label={pool.pool_name ?? pool.pool_key}
+                  value={fmtCents(pool.spent_this_period_cents)}
+                  sub={`of ${fmtCents(pool.monthly_limit_cents)} · ${pool.utilization_pct}% used`}
+                  status={
+                    !pool.is_active ? 'error'
+                    : pool.utilization_pct >= 90 ? 'error'
+                    : pool.utilization_pct >= 80 ? 'warn'
+                    : 'ok'
+                  }
+                />
+              ))}
+            </Section>
+          ) : null}
+
+          {/* ── Vendor Usage This Period ── */}
+          {stats.billing?.usage_this_period && (
+            <Section title="Vendor Usage — This Month">
+              <StatCard
+                label="Total Spend"
+                value={fmtCents(stats.billing.usage_this_period.total_cost_cents)}
+                sub={`${fmtNum(stats.billing.usage_this_period.total_events)} events`}
+                status={
+                  stats.billing.usage_this_period.total_cost_cents >= 5000 ? 'warn'
+                  : stats.billing.usage_this_period.total_events > 0 ? 'ok'
+                  : 'neutral'
+                }
+              />
+              <StatCard
+                label="Active Reservations"
+                value={fmtNum(stats.billing.active_reservations?.count)}
+                sub={`${fmtCents(stats.billing.active_reservations?.total_reserved_cents)} held`}
+                status="neutral"
+              />
+              {stats.billing.usage_this_period.by_provider.map(p => (
+                <StatCard
+                  key={p.provider_key}
+                  label={p.provider_key.toUpperCase()}
+                  value={fmtCents(p.cost_cents)}
+                  sub={`${fmtNum(p.events)} calls`}
+                  status="neutral"
+                />
+              ))}
+            </Section>
+          )}
+
+          {/* ── Credit Overview ── */}
+          {stats.billing?.credit_overview && (
+            <Section title="Credit Overview">
+              <StatCard
+                label="Available Credits"
+                value={fmtNum(stats.billing.credit_overview.total_available_credits)}
+                sub={`across ${fmtNum(stats.billing.credit_overview.total_wallets)} wallets`}
+                status={stats.billing.credit_overview.total_available_credits === 0 ? 'error' : 'ok'}
+              />
+              <StatCard
+                label="Reserved Credits"
+                value={fmtNum(stats.billing.credit_overview.total_reserved_credits)}
+                sub="in-flight reservations"
+                status={stats.billing.credit_overview.total_reserved_credits > 100 ? 'warn' : 'neutral'}
+              />
+            </Section>
+          )}
+
           {/* ── Platform Config ── */}
           <div>
             <p style={{
@@ -236,6 +340,7 @@ export default function AdminClient() {
                 { label: 'Business Verticals', href: '/admin/verticals',   desc: 'Manage business lines'      },
                 { label: 'Pipelines',          href: '/admin/pipelines',   desc: 'Configure deal pipelines'   },
                 { label: 'User Management',    href: '/admin/users',       desc: 'Invite & manage users'      },
+                { label: 'Billing Dashboard',  href: '/admin/billing',     desc: 'Budget pools · usage · credits' },
               ].map(item => (
                 <a
                   key={item.label}

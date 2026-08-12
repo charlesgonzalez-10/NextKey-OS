@@ -126,7 +126,7 @@ export default function WorkspaceClient(props: WorkspaceClientProps) {
   const router       = useRouter()
   const pathname     = usePathname()
   const searchParams = useSearchParams()
-  const propertyId   = pathname.split('/leads/')[1]
+  const propertyId   = pathname.split('/').filter(Boolean).pop() ?? ''
 
   // ── Mutable workspace data ──
   const [notes,     setNotes]     = useState<WorkspaceNote[]>(props.notes)

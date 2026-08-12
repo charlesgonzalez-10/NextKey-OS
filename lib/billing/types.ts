@@ -41,7 +41,7 @@ export type TransactionType =
 
 // ─── Budget reservation status ────────────────────────────────────────────────
 
-export type ReservationStatus = 'reserved' | 'finalized' | 'released' | 'expired'
+export type ReservationStatus = 'reserved' | 'finalized' | 'released' | 'expired' | 'needs_review'
 
 // ─── API Budget pool ──────────────────────────────────────────────────────────
 
@@ -134,16 +134,27 @@ export interface SubscriptionPlan {
   hard_stop_enabled: boolean
   is_public: boolean
   is_active: boolean
+  // Stripe integration
+  external_product_id:       string | null
+  external_price_id_monthly: string | null
+  external_price_id_annual:  string | null
 }
 
 export interface AccountSubscription {
   id: string
   account_id: string
   plan_id: string
-  status: 'active' | 'trialing' | 'past_due' | 'cancelled' | 'paused'
-  billing_period_start: string | null
-  billing_period_end: string | null
-  trial_ends_at: string | null
+  status: 'active' | 'trialing' | 'past_due' | 'incomplete' | 'incomplete_expired' | 'unpaid' | 'paused' | 'cancelled'
+  payment_provider:           string | null
+  external_customer_id:       string | null
+  external_subscription_id:   string | null
+  cancel_at_period_end:       boolean
+  cancelled_at:               string | null
+  billing_period_start:       string | null
+  billing_period_end:         string | null
+  trial_ends_at:              string | null
+  created_at:                 string
+  updated_at:                 string
 }
 
 // ─── Feature pricing ──────────────────────────────────────────────────────────
@@ -181,6 +192,9 @@ export interface CreditProduct {
   purchase_limit: number | null
   is_active: boolean
   display_order: number
+  // Stripe integration
+  external_product_id: string | null
+  external_price_id:   string | null
 }
 
 // ─── Promotion codes ──────────────────────────────────────────────────────────

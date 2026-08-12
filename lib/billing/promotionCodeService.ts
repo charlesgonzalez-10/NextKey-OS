@@ -16,6 +16,7 @@ import type {
 } from './types'
 import { creditWalletService } from './creditWalletService'
 import { creditLiabilityService } from './creditLiabilityService'
+import { subscriptionPlanService } from './subscriptionPlanService'
 
 export class PromotionCodeService {
 
@@ -270,6 +271,32 @@ export class PromotionCodeService {
         starts_at: new Date().toISOString(),
         expires_at: promo.expires_at ?? null,
         status: 'active',
+      })
+    }
+
+    // If the promotion grants special plan access, activate the plan now.
+    // This is the gap that caused special_plan_id to be recorded but never applied.
+    // Uses payment_provider='promotion' to distinguish from Stripe-billed subscriptions.
+    // syncCapToSubscription runs inside activateSubscription — this sets the plan's
+    // default vendor cost cap (e.g. $10 for partner_founder). Admin overrides are
+    // independent and take precedence via effective_cap_cents.
+    if (
+      promo.special_plan_id &&
+      (promo.promotion_types as PromotionType[]).includes('special_plan_access')
+    ) {
+      const now      = new Date()
+      const periodEnd = promo.expires_at
+        ? new Date(promo.expires_at)
+        : new Date(now.getFullYear(), now.getMonth() + 1, now.getDate())
+
+      await subscriptionPlanService.activateSubscription({
+        account_id:                 params.account_id,
+        plan_id:                    promo.special_plan_id,
+        payment_provider:           'promotion',
+        external_customer_id:       params.account_id,
+        external_subscription_id:   `promo:${params.promotion_code_id}:${redemption.id}`,
+        billing_period_start:       now.toISOString(),
+        billing_period_end:         periodEnd.toISOString(),
       })
     }
 

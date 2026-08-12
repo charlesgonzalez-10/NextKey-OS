@@ -184,7 +184,7 @@ export class SubscriptionPlanService {
     }
   }
 
-  private async getPlanById(plan_id: string): Promise<SubscriptionPlan | null> {
+  async getPlanById(plan_id: string): Promise<SubscriptionPlan | null> {
     const { data, error } = await serviceClient
       .from('subscription_plans')
       .select('*')
@@ -193,6 +193,20 @@ export class SubscriptionPlanService {
 
     if (error && error.code !== 'PGRST116') {
       throw new Error(`SubscriptionPlanService.getPlanById: ${error.message}`)
+    }
+    return data as SubscriptionPlan | null
+  }
+
+  /** Look up a plan by its Stripe price ID (used in webhook handler) */
+  async getPlanByPriceId(priceId: string): Promise<SubscriptionPlan | null> {
+    const { data, error } = await serviceClient
+      .from('subscription_plans')
+      .select('*')
+      .or(`external_price_id_monthly.eq.${priceId},external_price_id_annual.eq.${priceId}`)
+      .maybeSingle()
+
+    if (error && error.code !== 'PGRST116') {
+      throw new Error(`SubscriptionPlanService.getPlanByPriceId: ${error.message}`)
     }
     return data as SubscriptionPlan | null
   }

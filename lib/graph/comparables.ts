@@ -16,6 +16,9 @@
 
 import { serviceClient }        from '@/lib/supabase-service'
 import { fetchCompsFromReapi }  from './providers/mlsComps'
+import { providerGateway }      from '@/lib/billing/providerGateway'
+import { BACKGROUND_CONTEXT }   from '@/lib/billing/gatewayContext'
+import type { BillingContext }  from '@/lib/billing/gatewayContext'
 import type {
   PropertyComparable,
   ComparableIntelligence,
@@ -391,6 +394,7 @@ export interface GetCompsOptions {
   radiusMiles?:     number
   maxComps?:        number
   soldWithinDays?:  number
+  billing?:         BillingContext
 }
 
 /**
@@ -418,7 +422,24 @@ export async function getComparableIntelligence(
     }
   }
 
-  // ── 2. Build fetch query ──────────────────────────────────────────────────
+  // ── 2. Authorize via ProviderGateway before any REAPI call ───────────────
+  // Fail closed: if authorization fails, serve whatever is in DB (may be stale).
+  const billing = opts.billing ?? BACKGROUND_CONTEXT
+  const requestId = crypto.randomUUID()
+
+  const auth = await providerGateway.authorizeFeature({
+    request_id:  requestId,
+    account_id:  billing.account_id,
+    feature_key: 'comps_refresh',
+    pool_key:    billing.pool_key,
+  })
+
+  if (!auth.success) {
+    const { rows } = await loadCachedComps(propertyId)
+    return assembleIntelligence(propertyId, rows.map(rowToPropertyComparable), fetchedAt, true)
+  }
+
+  // ── 3. Build fetch query ──────────────────────────────────────────────────
   const baseQuery: CompFetchQuery = {
     address:       subject.address,
     city:          subject.city,
@@ -430,7 +451,7 @@ export async function getComparableIntelligence(
     soldWithinDays: opts.soldWithinDays ?? 180,
   }
 
-  // ── 3. Fetch all statuses in parallel ─────────────────────────────────────
+  // ── 4. Fetch all statuses in parallel ─────────────────────────────────────
   // Three calls: active, pending, sold. Total cost ~$0.15 for a full refresh.
   // No photos in any call.
   const [activeResult, pendingResult, soldResult] = await Promise.all([
@@ -439,13 +460,28 @@ export async function getComparableIntelligence(
     fetchCompsFromReapi({ ...baseQuery, status: 'sold' }),
   ])
 
+  // ── 5. Finalize reservation with actual cost ──────────────────────────────
+  const anySuccess  = activeResult.success || pendingResult.success || soldResult.success
+  const actualCost  = [activeResult, pendingResult, soldResult]
+    .filter(r => r.success)
+    .reduce((sum, r) => sum + r.costCents, 0)
+  const maxDuration = Math.max(activeResult.durationMs, pendingResult.durationMs, soldResult.durationMs)
+
+  await providerGateway.finalize({
+    request_id:        requestId,
+    actual_cost_cents: actualCost,
+    success:           anySuccess,
+    cache_hit:         false,
+    duration_ms:       maxDuration,
+  })
+
   const allComps = [
     ...activeResult.comps,
     ...pendingResult.comps,
     ...soldResult.comps,
   ]
 
-  // ── 4. Deduplicate by provenanceId before persisting ──────────────────────
+  // ── 6. Deduplicate by provenanceId before persisting ──────────────────────
   const seen    = new Set<string>()
   const unique  = allComps.filter(c => {
     if (seen.has(c.provenanceId)) return false
@@ -453,10 +489,10 @@ export async function getComparableIntelligence(
     return true
   })
 
-  // ── 5. Score and persist ──────────────────────────────────────────────────
+  // ── 7. Score and persist ──────────────────────────────────────────────────
   await persistComps(propertyId, unique, subject, null)
 
-  // ── 6. Load fresh rows from DB (includes IDs and timestamps) ─────────────
+  // ── 8. Load fresh rows from DB (includes IDs and timestamps) ─────────────
   const { rows: freshRows } = await loadCachedComps(propertyId)
   const comps = freshRows.map(rowToPropertyComparable)
 

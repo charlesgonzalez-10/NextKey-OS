@@ -7,7 +7,7 @@
  *
  * Pool:      background_operations (BACKGROUND_CONTEXT)
  * Credits:   0 — background jobs never charge customer credits
- * Cost:      5¢/page  (property_search_criteria feature)
+ * Cost:      5¢/page  (distress_ingestion_search feature)
  * Idempotency: request_id = ing-{runId}-{county}-{distressType}-p{pageNum}
  *
  * Run controls (all configurable, with safe defaults):
@@ -124,7 +124,7 @@ export const DEFAULT_INGESTION_CONFIG: IngestionRunConfig = {
   timeoutMs:               240_000,
 }
 
-export const INGESTION_FEATURE_KEY = 'property_search_criteria'
+export const INGESTION_FEATURE_KEY = 'distress_ingestion_search'
 
 export interface REAPIIngestionResult {
   county:               REAPICounty

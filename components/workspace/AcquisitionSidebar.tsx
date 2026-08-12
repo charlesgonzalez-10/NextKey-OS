@@ -56,9 +56,24 @@ const ACTION_TYPE_ICON: Record<string, string> = {
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 
 export default function AcquisitionSidebar() {
-  const { lead, acquisition, setActiveTab, updateLeadField } = useWorkspace()
+  const { lead, acquisition, setActiveTab, updateLeadField, patchLeadLocal } = useWorkspace()
   const { progress, nextActions, offerStatus, communicationStatus, documentStatus } = acquisition
   const [settingStage, setSettingStage] = useState(false)
+  const [savingLead, setSavingLead]     = useState(false)
+
+  const handleSaveToLeads = async () => {
+    if (savingLead) return
+    setSavingLead(true)
+    try {
+      const res = await fetch(`/api/properties/${lead.id}/add-lead`, { method: 'POST' })
+      if (res.ok) {
+        const data = await res.json()
+        patchLeadLocal({ is_lead: true, lead_id: data.lead_id ?? data.id ?? null })
+      }
+    } finally {
+      setSavingLead(false)
+    }
+  }
 
   const handleNextAction = (action: NextAction) => {
     setActiveTab(action.tab as TabId)
@@ -74,6 +89,28 @@ export default function AcquisitionSidebar() {
 
   return (
     <div style={{ borderLeft: '1px solid #1a3050', background: '#080f1c', overflowY: 'auto', display: 'flex', flexDirection: 'column', fontSize: 12 }}>
+
+      {/* ── Save to Leads CTA (unsaved properties) ── */}
+      {!lead.is_lead && (
+        <div style={{ padding: '10px 14px', borderBottom: '1px solid #1a3050', background: 'rgba(201,168,76,0.06)' }}>
+          <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: '#C9A84C', marginBottom: 6 }}>
+            Not In Contacts
+          </div>
+          <p style={{ fontSize: 10, color: '#94a3b8', marginBottom: 8, lineHeight: 1.4 }}>
+            This property isn&apos;t saved to your CRM yet. Save it to track pipeline stage, send offers, and log communications.
+          </p>
+          <button
+            onClick={handleSaveToLeads}
+            disabled={savingLead}
+            style={{
+              width: '100%', padding: '6px 0', borderRadius: 8, border: '1px solid rgba(201,168,76,0.4)',
+              background: 'rgba(201,168,76,0.15)', color: '#C9A84C', fontWeight: 700, fontSize: 11,
+              cursor: savingLead ? 'not-allowed' : 'pointer', opacity: savingLead ? 0.6 : 1,
+            }}>
+            {savingLead ? 'Saving…' : '+ Save to Contacts'}
+          </button>
+        </div>
+      )}
 
       {/* ── Acquisition Progress ── */}
       <div style={{ padding: '12px 14px', borderBottom: '1px solid #1a3050' }}>

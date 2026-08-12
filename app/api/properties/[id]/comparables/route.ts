@@ -18,6 +18,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient }              from '@/lib/supabase/server'
 import { propertyGraph }             from '@/lib/graph/propertyGraph'
+import { buildCustomerContext }      from '@/lib/billing/gatewayContext'
 import type { CompStatus }           from '@/lib/graph/types'
 
 export const dynamic = 'force-dynamic'
@@ -39,7 +40,11 @@ export async function GET(
   const radius  = parseFloat(sp.get('radius') ?? '0.5') || 0.5
 
   try {
-    const comps = await propertyGraph.getComparableIntelligence(id, { force, radiusMiles: radius })
+    const comps = await propertyGraph.getComparableIntelligence(id, {
+      force,
+      radiusMiles: radius,
+      billing:     buildCustomerContext(user.id),
+    })
     if (!comps) return NextResponse.json({ error: 'Property not found' }, { status: 404 })
 
     // Apply status filter if requested
@@ -76,9 +81,10 @@ export async function POST(
   try {
     const comps = await propertyGraph.getComparableIntelligence(id, {
       force:          true,
-      radiusMiles:    body.radius        ?? 0.5,
-      maxComps:       body.max_comps     ?? 10,
+      radiusMiles:    body.radius           ?? 0.5,
+      maxComps:       body.max_comps        ?? 10,
       soldWithinDays: body.sold_within_days ?? 180,
+      billing:        buildCustomerContext(user.id),
     })
 
     if (!comps) return NextResponse.json({ error: 'Property not found' }, { status: 404 })

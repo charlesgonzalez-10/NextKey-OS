@@ -39,8 +39,6 @@ const MAP_STYLES: google.maps.MapTypeStyle[] = [
   { featureType: 'all',                    elementType: 'labels.text.stroke', stylers: [{ color: '#0a1f44' }, { weight: 3 }] },
 
   // ── City / locality names — white & bold ───────────────────────────────────
-  { featureType: 'locality',               elementType: 'labels.text.fill',   stylers: [{ color: '#ffffff' }] },
-  { featureType: 'locality',               elementType: 'labels.text.stroke', stylers: [{ color: '#071829' }, { weight: 4 }] },
   { featureType: 'administrative.locality',elementType: 'labels.text.fill',   stylers: [{ color: '#ffffff' }] },
   { featureType: 'administrative.locality',elementType: 'labels.text.stroke', stylers: [{ color: '#071829' }, { weight: 4 }] },
 

@@ -67,8 +67,58 @@ export class ProviderGateway {
     })
 
     if (error) {
-      console.error(`[ProviderGateway] RPC error: ${error.message}`)
-      // Fail closed: any RPC failure blocks the call
+      // Distinguish a duplicate request_id (idempotency key collision — SQLSTATE 23505)
+      // from a real infrastructure failure.  The RPC function inserts into
+      // api_budget_reservations with a UNIQUE constraint on request_id; if the same
+      // request_id is used twice (e.g. page reload within the same session-minute),
+      // Postgres throws 23505 instead of running the gate checks.
+      const isDuplicate =
+        error.code === '23505' ||
+        /duplicate key|unique.*request_id|request_id.*unique/i.test(error.message ?? '')
+
+      if (isDuplicate) {
+        // Look up the existing reservation status to decide how to respond.
+        const { data: existing } = await serviceClient
+          .from('api_budget_reservations')
+          .select('id, status')
+          .eq('request_id', request.request_id)
+          .maybeSingle()
+
+        const existingStatus = existing?.status ?? 'unknown'
+        console.warn(
+          `[ProviderGateway] Duplicate request_id="${request.request_id}" ` +
+          `existing_status=${existingStatus} — this is an idempotency-key collision, not an auth failure.`
+        )
+
+        if (existingStatus === 'finalized') {
+          // Already completed successfully. The provider call already happened and was
+          // billed. Do NOT proceed with another call. The caller should use cached results.
+          return {
+            success: false,
+            budget_reservation_id: null,
+            credit_reservation_id: null,
+            gate_failed: undefined,
+            error_code: 'idempotent_duplicate',
+            error_message: 'Request already completed. Use cached results.',
+          }
+        }
+
+        // Reserved (in-flight) or released/expired — caller should retry with a new ID.
+        return {
+          success: false,
+          budget_reservation_id: null,
+          credit_reservation_id: null,
+          gate_failed: undefined,
+          error_code: 'duplicate_request_id',
+          error_message: `Request ID collision (status=${existingStatus}). Retry with a new request ID.`,
+        }
+      }
+
+      console.error(
+        `[ProviderGateway] RPC fn_reserve_budget_and_credits error` +
+        ` code=${error.code ?? 'n/a'} message="${error.message}" request_id="${request.request_id}"`
+      )
+      // Fail closed: any other RPC failure blocks the call
       return {
         success: false,
         budget_reservation_id: null,

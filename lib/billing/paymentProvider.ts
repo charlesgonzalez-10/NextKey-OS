@@ -16,6 +16,7 @@ export interface CheckoutSessionRequest {
   success_url: string
   cancel_url: string
   idempotency_key: string
+  mode?: 'subscription' | 'payment'
   metadata?: Record<string, string>
   promotion_code?: string
 }
@@ -90,6 +91,11 @@ export interface IPaymentProvider {
   getPayment(
     external_payment_id: string
   ): Promise<PaymentRecord>
+
+  createPortalSession(
+    external_customer_id: string,
+    return_url: string
+  ): Promise<{ url: string }>
 }
 
 // Stub for Phase A — always throws; replaced in Phase D.
@@ -108,4 +114,5 @@ export class UnimplementedPaymentProvider implements IPaymentProvider {
   cancelSubscription(): Promise<SubscriptionRecord>               { return Promise.reject(this.notReady()) }
   verifyWebhookSignature(): Promise<WebhookEvent>                  { return Promise.reject(this.notReady()) }
   getPayment(): Promise<PaymentRecord>                             { return Promise.reject(this.notReady()) }
+  createPortalSession(): Promise<{ url: string }>                  { return Promise.reject(this.notReady()) }
 }

@@ -1724,7 +1724,7 @@ export default function LeadsClient({ initialStats }: { initialStats: Stats }) {
               const sel   = selected.has(lead.id)
               return (
                 <div key={lead.id}
-                  onClick={() => router.push(`/leads/${lead.id}`)}
+                  onClick={() => router.push(`/properties/${lead.id}`)}
                   className="rounded-xl p-4 cursor-pointer transition-all hover:shadow-lg"
                   style={{
                     backgroundColor: sel ? 'rgba(201,168,76,0.06)' : 'var(--c-card)',
@@ -1849,7 +1849,7 @@ export default function LeadsClient({ initialStats }: { initialStats: Stats }) {
                     columns={colOrder}
                     onSelect={toggleSelect}
                     onStar={handleStar}
-                    onClick={id => router.push(`/leads/${id}`)}
+                    onClick={id => router.push(`/properties/${id}`)}
                     onDelete={deleteSingle}
                     onMakeOffer={setOfferLead}
                     onQuickNote={setNoteLead}
