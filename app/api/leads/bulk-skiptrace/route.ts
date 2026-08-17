@@ -15,6 +15,7 @@ import { createClient } from '@/lib/supabase/server'
 import { serviceClient } from '@/lib/supabase-service'
 import { bulkSkipTrace } from '@/lib/skiptrace/service'
 import { getModuleFreshness } from '@/lib/propertyService'
+import { buildCustomerContext } from '@/lib/billing/gatewayContext'
 
 export const dynamic     = 'force-dynamic'
 export const maxDuration = 300
@@ -68,11 +69,13 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Execute traces ─────────────────────────────────────────────────────────
+  const billing = buildCustomerContext(user.id)
   const summary = await bulkSkipTrace({
     propertyIds,
     userId:    user.id,
     userEmail: user.email ?? 'system',
     force,
+    billing,
   })
 
   return NextResponse.json(summary)

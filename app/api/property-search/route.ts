@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { searchProperty, detectCounty } from '@/lib/enrichment/property-search'
 import type { County } from '@/lib/enrichment/types'
+import { buildCustomerContext } from '@/lib/billing/gatewayContext'
 import {
   ensurePropertyRecord,
   recordPropertySearch,
@@ -41,7 +42,8 @@ export async function GET(req: NextRequest) {
     county && county !== 'unknown' ? county : undefined
 
   try {
-    const result = await searchProperty(query, resolvedCounty)
+    const billing = buildCustomerContext(user.id)
+    const result = await searchProperty(query, resolvedCounty, billing)
 
     if (!result) {
       return NextResponse.json({

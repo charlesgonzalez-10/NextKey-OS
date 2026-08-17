@@ -23,7 +23,6 @@
 
 import type { ORRecord }   from './adapters/types'
 import type { County }     from '@/lib/scrapers/types'
-import { findFolioByAddressGIS } from '@/lib/enrichment/miami-dade-pa'
 import { getPropertyDetailByAddress } from '@/lib/enrichment/reapi'
 import { BACKGROUND_CONTEXT } from '@/lib/billing/gatewayContext'
 
@@ -157,7 +156,7 @@ export interface ResolutionResult {
   folio_number:     string | null   // null = could not resolve; record stored for manual review
   property_address: string | null   // normalised address used for lookup
   owner_name:       string | null   // from PA if available
-  resolution_method: 'legal_extract' | 'gis_lookup' | 'reapi_lookup' | 'unresolved'
+  resolution_method: 'legal_extract' | 'reapi_lookup' | 'unresolved'
 }
 
 // ─── Main resolver ────────────────────────────────────────────────────────────
@@ -193,47 +192,22 @@ export async function resolveCourtRecordToFolio(
 
   const normAddr = normalizeCourtAddress(rawAddr)
 
-  switch (record.county) {
-    // Miami-Dade: use the free GIS parcel layer (no API key needed)
-    case 'miami-dade': {
-      try {
-        const result = await findFolioByAddressGIS(normAddr)
-        if (result) {
-          console.log(`[Resolver] ${record.case_number}: GIS lookup → ${result.folio}`)
-          return {
-            folio_number:      result.folio,
-            property_address:  normAddr,
-            owner_name:        null,
-            resolution_method: 'gis_lookup',
-          }
-        }
-      } catch (err) {
-        console.warn(`[Resolver] GIS lookup failed for ${record.case_number}:`, err)
-      }
-      break
+  // All counties: REAPI via background_operations pool
+  const outcome = await getPropertyDetailByAddress(normAddr, record.county as County, BACKGROUND_CONTEXT)
+  if (outcome.outcome === 'success' && outcome.data?.folio) {
+    console.log(`[Resolver] ${record.case_number}: REAPI lookup → ${outcome.data.folio}`)
+    return {
+      folio_number:      outcome.data.folio,
+      property_address:  normAddr,
+      owner_name:        outcome.data.owner_name,
+      resolution_method: 'reapi_lookup',
     }
-
-    // Broward / Palm Beach: use REAPI via background_operations pool
-    case 'broward':
-    case 'palm-beach': {
-      const outcome = await getPropertyDetailByAddress(normAddr, record.county, BACKGROUND_CONTEXT)
-      if (outcome.outcome === 'success' && outcome.data?.folio) {
-        console.log(`[Resolver] ${record.case_number}: REAPI lookup → ${outcome.data.folio}`)
-        return {
-          folio_number:      outcome.data.folio,
-          property_address:  normAddr,
-          owner_name:        outcome.data.owner_name,
-          resolution_method: 'reapi_lookup',
-        }
-      }
-      if (outcome.outcome === 'blocked') {
-        const tag = outcome.error_code === 'pool_exhausted' ? 'background_paused_by_budget' : outcome.error_code
-        console.warn(`[Resolver] REAPI blocked for ${record.case_number}: ${tag}`)
-      } else if (outcome.outcome === 'provider_failed') {
-        console.warn(`[Resolver] REAPI failed for ${record.case_number}:`, outcome.error)
-      }
-      break
-    }
+  }
+  if (outcome.outcome === 'blocked') {
+    const tag = outcome.error_code === 'pool_exhausted' ? 'background_paused_by_budget' : outcome.error_code
+    console.warn(`[Resolver] REAPI blocked for ${record.case_number}: ${tag}`)
+  } else if (outcome.outcome === 'provider_failed') {
+    console.warn(`[Resolver] REAPI failed for ${record.case_number}:`, outcome.error)
   }
 
   console.log(`[Resolver] ${record.case_number}: address lookup failed for "${normAddr}" — unresolved`)

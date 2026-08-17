@@ -18,7 +18,6 @@
  */
 
 import { mlsReapiProvider }  from './providers/mlsReapi'
-import { countyPaProvider }  from './providers/countyPa'
 import { recordFieldSources } from '@/lib/dsoe'
 import { logDSOERequest }     from '@/lib/dsoe'
 import type {
@@ -35,7 +34,6 @@ import type {
 
 const PROVIDER_REGISTRY: Record<string, DsoeProviderDef> = {
   'mls-reapi':  mlsReapiProvider,
-  'county-pa':  countyPaProvider,
 }
 
 // ── Per-intent provider stacks ────────────────────────────────────────────────
@@ -45,11 +43,11 @@ const PROVIDER_REGISTRY: Record<string, DsoeProviderDef> = {
 
 const INTENT_STACKS: Record<DsoeIntent, string[]> = {
   listing:      ['mls-reapi'],
-  ownership:    ['county-pa'],
-  legal_status: ['county-pa'],           // Sprint 2+ adds: clerk-of-court, tax-collector
-  valuation:    ['county-pa', 'mls-reapi'],
-  comps:        ['mls-reapi'],           // Sprint 2+ may add: county-pa (official records)
-  full_profile: ['county-pa', 'mls-reapi'], // public_records first, then mls_intelligence
+  ownership:    ['mls-reapi'],
+  legal_status: ['mls-reapi'],
+  valuation:    ['mls-reapi'],
+  comps:        ['mls-reapi'],
+  full_profile: ['mls-reapi'],
 }
 
 // ── Field-authority merge ─────────────────────────────────────────────────────
@@ -60,9 +58,8 @@ function buildAuthorityIndex(): Map<string, string> {
   const index = new Map<string, string>()
   for (const provider of Object.values(PROVIDER_REGISTRY)) {
     for (const field of provider.authoritative_fields) {
-      // Later registrations win if there's a conflict — county-pa is registered
-      // before mls-reapi so mls-reapi authority fields overwrite county-pa for
-      // the same field name (mls_* fields). In practice there's no overlap.
+      // Later registrations win if there's a conflict — providers registered
+      // earlier yield to later ones on shared field names.
       index.set(field, provider.id)
     }
   }

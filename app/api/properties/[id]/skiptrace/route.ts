@@ -12,6 +12,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { serviceClient } from '@/lib/supabase-service'
 import { getLatestSkipTrace, runSkipTrace } from '@/lib/skiptrace/service'
+import { buildCustomerContext } from '@/lib/billing/gatewayContext'
 
 export const dynamic   = 'force-dynamic'
 export const maxDuration = 45
@@ -75,6 +76,7 @@ export async function POST(
   }
 
   try {
+    const billing = buildCustomerContext(user.id)
     const { stored, fromCache } = await runSkipTrace({
       propertyId: id,
       leadId:     lead?.id ?? null,
@@ -82,6 +84,7 @@ export async function POST(
       userId:     user.id,
       userEmail:  user.email ?? 'system',
       force,
+      billing,
     })
 
     return NextResponse.json({ result: stored, from_cache: fromCache })

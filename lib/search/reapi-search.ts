@@ -539,12 +539,12 @@ export interface SearchGatewayConfig {
 }
 
 export const DEFAULT_SEARCH_CONFIG: SearchGatewayConfig = {
-  maxPaidPages:       4,
-  maxVendorCostCents: 30,   // 4 pages × 5¢ + 10¢ margin
+  maxPaidPages:       1,
+  maxVendorCostCents: 10,   // 1 page × 5¢ + 5¢ margin
   // 50 records/page: REAPI account wallet supports this size.
   // Increase to 250 once REAPI account is funded at console.realestateapi.com/dashboard/billing.
   pageSize:           50,
-  maxTotalRecords:    200,
+  maxTotalRecords:    50,
 }
 
 export type SearchOutcomeCode =
