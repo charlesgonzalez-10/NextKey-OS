@@ -255,7 +255,8 @@ CREATE INDEX IF NOT EXISTS idx_aal_action ON admin_action_log(action_type, creat
 
 ALTER TABLE admin_action_log ENABLE ROW LEVEL SECURITY;
 -- Admins can read; no one can write directly (service-role only)
-CREATE POLICY IF NOT EXISTS "service_role_only" ON admin_action_log USING (false) WITH CHECK (false);
+DROP POLICY IF EXISTS "service_role_only" ON admin_action_log;
+CREATE POLICY "service_role_only" ON admin_action_log USING (false) WITH CHECK (false);
 
 -- ─── 7. Economics query indexes ───────────────────────────────────────────────
 -- Support efficient aggregation of api_usage_events by feature, provider, account.
