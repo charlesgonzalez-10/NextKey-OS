@@ -112,6 +112,7 @@ export class CreditProductService {
     idempotency_key: string
     external_payment_id: string
     amount_paid_cents: number
+    payment_provider: string
   }): Promise<CreditPurchaseRecord> {
     const { data, error } = await serviceClient
       .from('credit_purchases')
@@ -119,6 +120,7 @@ export class CreditProductService {
         status: 'completed',
         external_payment_id: params.external_payment_id,
         amount_paid_cents: params.amount_paid_cents,
+        payment_provider: params.payment_provider,
         purchased_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })

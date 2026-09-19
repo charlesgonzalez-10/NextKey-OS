@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 
 const DocumentViewer       = dynamic(() => import('@/components/DocumentViewer'), { ssr: false })
-const RoleAssignmentPanel  = dynamic(() => import('@/components/documents/RoleAssignmentPanel') as Promise<{ default: React.ComponentType<{ documentId: string; propertyId?: string | null; contactId?: string | null; onClose: () => void; onSent: (signers: unknown[], sessionId: string) => void }> }>, { ssr: false })
+const RoleAssignmentPanel  = dynamic(() => import('@/components/documents/RoleAssignmentPanel') as Promise<{ default: React.ComponentType<{ documentId: string; propertyId?: string | null; contactId?: string | null; dealId?: string | null; onClose: () => void; onSent: (signers: unknown[], sessionId: string) => void }> }>, { ssr: false })
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -695,6 +695,7 @@ export default function DocDetailClient({ docId }: { docId: string }) {
           documentId={doc.id}
           propertyId={doc.property_id}
           contactId={doc.contact_id}
+          dealId={doc.deal_id}
           onClose={() => setShowRolePanel(false)}
           onSent={(_signers) => {
             setShowRolePanel(false)

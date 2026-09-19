@@ -561,8 +561,8 @@ export type SearchOutcomeCode =
   | 'provider_failed'
 
 export type GatewaySearchOutcome =
-  | { outcome: 'success';        properties: LiveProperty[]; total: number; pages_fetched: number }
-  | { outcome: 'partial_result'; properties: LiveProperty[]; total: number; pages_fetched: number; blocked_at_page: number; error_code: SearchOutcomeCode; safe_message: string }
+  | { outcome: 'success';        properties: LiveProperty[]; total: number; pages_fetched: number; has_more: boolean }
+  | { outcome: 'partial_result'; properties: LiveProperty[]; total: number; pages_fetched: number; blocked_at_page: number; error_code: SearchOutcomeCode; safe_message: string; has_more: boolean }
   | { outcome: SearchOutcomeCode; error_code: string; safe_message: string }
 
 function mapAuthToSearchOutcome(auth: AuthorizationResult): SearchOutcomeCode {
@@ -735,7 +735,7 @@ export async function executeGatewaySearch(
               `[Search] idempotent_duplicate — recovered ${recovered.length} results from cache ` +
               `request_id=${request_id} logicalSearchId=${logicalSearchId}`
             )
-            return { outcome: 'success', properties: recovered, total: cached.result_count as number, pages_fetched: 0 }
+            return { outcome: 'success', properties: recovered, total: cached.result_count as number, pages_fetched: 0, has_more: recovered.length < (cached.result_count as number) }
           }
         } catch {
           // Cache unavailable — fall through to error
@@ -765,6 +765,7 @@ export async function executeGatewaySearch(
             blocked_at_page: pageNum,
             error_code:      'authorization_unavailable' as SearchOutcomeCode,
             safe_message:    'Showing partial results. A concurrent search is in progress.',
+            has_more:        true,
           }
         }
         return {
@@ -783,6 +784,7 @@ export async function executeGatewaySearch(
           blocked_at_page: pageNum,
           error_code:      code,
           safe_message:    auth.error_message ?? 'Budget reached. Showing partial results.',
+          has_more:        true,
         }
       }
       return {
@@ -851,6 +853,7 @@ export async function executeGatewaySearch(
           blocked_at_page: pageNum,
           error_code:      isAccount ? 'reapi_account_insufficient' : 'provider_failed',
           safe_message:    isAccount ? errMsg : 'Provider error. Showing partial results.',
+          has_more:        true,
         }
       }
       return {
@@ -861,7 +864,7 @@ export async function executeGatewaySearch(
     }
   }
 
-  return { outcome: 'success', properties, total: totalInMarket, pages_fetched: pagesFetched }
+  return { outcome: 'success', properties, total: totalInMarket, pages_fetched: pagesFetched, has_more: properties.length < totalInMarket }
 }
 
 // ─── Legacy unguarded search (internal — not exported) ───────────────────────

@@ -53,10 +53,15 @@ export async function POST(req: NextRequest) {
     // Find or create Stripe customer
     const externalCustomerId = await ensureStripeCustomer(user.id, user.email ?? '')
 
-    // Day-stable idempotency: one checkout session per account+plan per calendar day.
-    // Prevents duplicate Stripe objects if the connection drops and the client retries.
-    const dayEpoch = Math.floor(Date.now() / 86_400_000)
-    const stripeIdempotencyKey = `checkout:subscription:${user.id}:${plan.id}:${dayEpoch}`
+    // Durable checkout idempotency: caller may pass a checkout_attempt_id to retry
+    // the exact same Stripe session (e.g. after a network timeout). A fresh checkout
+    // (no id provided) always generates a new UUID → new Stripe session. This mirrors
+    // the credit-pack pattern (purchase UUID) without requiring a new DB table.
+    const checkoutAttemptId =
+      typeof body.checkout_attempt_id === 'string' && body.checkout_attempt_id
+        ? body.checkout_attempt_id
+        : crypto.randomUUID()
+    const stripeIdempotencyKey = `checkout:subscription:${user.id}:${plan.id}:${checkoutAttemptId}`
 
     try {
       const session = await stripeProvider.createCheckoutSession({
@@ -70,7 +75,7 @@ export async function POST(req: NextRequest) {
         metadata:             { plan_key: planKey, plan_id: plan.id },
         promotion_code:       promotionCode,
       })
-      return NextResponse.json({ checkout_url: session.checkout_url })
+      return NextResponse.json({ checkout_url: session.checkout_url, checkout_attempt_id: checkoutAttemptId })
     } catch (err) {
       console.error('[Checkout] Subscription session creation failed:', err)
       return NextResponse.json({ error: 'Failed to create checkout session' }, { status: 500 })

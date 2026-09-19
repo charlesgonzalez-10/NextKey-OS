@@ -19,7 +19,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { serviceClient } from '@/lib/supabase-service'
 import { stripeProvider } from '@/lib/billing/stripe/stripeProvider'
-import { subscriptionPlanService } from '@/lib/billing/subscriptionPlanService'
+import { subscriptionPlanService, stripeIdToSourceUuid } from '@/lib/billing/subscriptionPlanService'
 import { creditProductService } from '@/lib/billing/creditProductService'
 import { creditWalletService } from '@/lib/billing/creditWalletService'
 
@@ -252,6 +252,7 @@ async function handleCheckoutCompleted(session: Record<string, unknown>): Promis
         idempotency_key:     idempotencyKey,
         external_payment_id: externalPaymentId,
         amount_paid_cents:   amountTotal,
+        payment_provider:    'stripe',
       })
     }
 
@@ -321,27 +322,32 @@ async function handleInvoicePaid(invoice: Record<string, unknown>): Promise<void
     )
   }
 
-  // Idempotency: one renewal grant per subscription per invoice period
-  const periodStart = invoice.period_start as number ?? 0
+  // Business-level idempotency: one renewal grant per Stripe invoice.
+  // Using invoice.id (not event.id) so the same billing cycle cannot be applied twice
+  // even if two different Stripe events represent it (e.g. resent events, retries).
+  // credit_grants.source_id is a uuid column; convert the Stripe invoice ID to a
+  // deterministic UUID so the check and the write use the same value.
+  const invoiceId = invoice.id as string
+  const invoiceSourceUuid = stripeIdToSourceUuid(invoiceId)
   const { data: existing } = await serviceClient
     .from('credit_grants')
     .select('id')
     .eq('source_type', 'subscription')
-    .eq('source_id', sub.id)
-    .gte('created_at', new Date(periodStart * 1000).toISOString())
+    .eq('source_id', invoiceSourceUuid)
+    .eq('grant_type', 'monthly')
     .limit(1)
     .maybeSingle()
 
   if (existing) {
     console.info(
-      `[Webhook] Monthly renewal credits already granted for subscription=${sub.id} invoice=${invoice.id}`
+      `[Webhook] Monthly renewal credits already granted for invoice=${invoiceId}`
     )
     return
   }
 
-  await subscriptionPlanService.renewMonthlyCredits(sub.account_id)
+  await subscriptionPlanService.renewMonthlyCredits(sub.account_id, invoiceId)
   console.info(
-    `[Webhook] Renewed monthly credits for account=${sub.account_id} subscription=${sub.id}`
+    `[Webhook] Renewed monthly credits for account=${sub.account_id} invoice=${invoiceId}`
   )
 }
 
@@ -407,13 +413,14 @@ async function handleSubscriptionUpdate(sub: Record<string, unknown>): Promise<v
   }
 
   // Full activation path: find plan by Stripe price ID
-  const priceId = (
-    sub.items as { data?: { price?: { id?: string } }[] }
-  )?.data?.[0]?.price?.id
+  const subItems = (sub.items as { data?: { price?: { id?: string }; current_period_start?: number; current_period_end?: number }[] })?.data
+  const firstItem = subItems?.[0]
+  const priceId   = firstItem?.price?.id
   const plan = priceId ? await subscriptionPlanService.getPlanByPriceId(priceId) : null
 
-  const periodStart = sub.current_period_start as number
-  const periodEnd   = sub.current_period_end   as number
+  // Stripe API 2024+ moved period timestamps to items[0]; fall back to root for older payloads
+  const periodStart = (firstItem?.current_period_start ?? sub.current_period_start) as number | undefined
+  const periodEnd   = (firstItem?.current_period_end   ?? sub.current_period_end)   as number | undefined
 
   if (plan && nextKeyStatus === 'active') {
     await subscriptionPlanService.activateSubscription({
@@ -422,8 +429,8 @@ async function handleSubscriptionUpdate(sub: Record<string, unknown>): Promise<v
       payment_provider:         'stripe',
       external_customer_id:     externalCustomerId,
       external_subscription_id: externalSubId,
-      billing_period_start:     new Date(periodStart * 1000).toISOString(),
-      billing_period_end:       new Date(periodEnd   * 1000).toISOString(),
+      billing_period_start:     periodStart ? new Date(periodStart * 1000).toISOString() : new Date().toISOString(),
+      billing_period_end:       periodEnd   ? new Date(periodEnd   * 1000).toISOString() : new Date(Date.now() + 30 * 86400000).toISOString(),
     })
     console.info(
       `[Webhook] Subscription activated: account=${accountId} plan=${plan.plan_key}`

@@ -193,7 +193,10 @@ describe('executeGatewaySearch', () => {
     mockPage([RAW_PROPERTY_1], 300, 2, 250)
     mockPage([RAW_PROPERTY_2], 300)
 
-    const result = await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID)
+    // Explicit multi-page request: default is 1 page; opt in with maxPaidPages>1
+    const result = await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID, {
+      ...DEFAULT_SEARCH_CONFIG, maxPaidPages: 4,
+    })
 
     expect(result.outcome).toBe('success')
     expect((result as any).properties).toHaveLength(2)
@@ -267,7 +270,10 @@ describe('executeGatewaySearch', () => {
     mockAuthorize.mockResolvedValueOnce(AUTH_POOL_BLOCKED)
     mockPage([RAW_PROPERTY_1], 300, 2, 250)  // more results available
 
-    const result = await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID) as any
+    // Explicit multi-page request: default is 1 page; opt in with maxPaidPages>1
+    const result = await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID, {
+      ...DEFAULT_SEARCH_CONFIG, maxPaidPages: 4,
+    }) as any
 
     expect(result.outcome).toBe('partial_result')
     expect(result.properties).toHaveLength(1)
@@ -283,7 +289,10 @@ describe('executeGatewaySearch', () => {
     mockAuthorize.mockResolvedValueOnce(AUTH_CREDIT_BLOCKED)
     mockPage([RAW_PROPERTY_1], 500, 2, 250)
 
-    const result = await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID) as any
+    // Explicit multi-page request: default is 1 page; opt in with maxPaidPages>1
+    const result = await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID, {
+      ...DEFAULT_SEARCH_CONFIG, maxPaidPages: 4,
+    }) as any
 
     expect(result.outcome).toBe('partial_result')
     expect(result.safe_message).toBeTruthy()
@@ -438,7 +447,10 @@ describe('executeGatewaySearch', () => {
     mockPage([RAW_PROPERTY_1], 300, 2, 250)  // page 1 signals more data
     mockPage([RAW_PROPERTY_2], 300)
 
-    await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID)
+    // Explicit multi-page request: default is 1 page; opt in with maxPaidPages>1
+    await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID, {
+      ...DEFAULT_SEARCH_CONFIG, maxPaidPages: 4,
+    })
 
     const calls = mockAuthorize.mock.calls as any[][]
     expect(calls).toHaveLength(2)
@@ -565,7 +577,10 @@ describe('executeGatewaySearch', () => {
     mockPage([RAW_PROPERTY_1], 500, 2, 250)         // page 1 succeeds
     mockProviderError(502)                          // page 2 fetch throws
 
-    const result = await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID) as any
+    // Explicit multi-page request: default is 1 page; opt in with maxPaidPages>1
+    const result = await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID, {
+      ...DEFAULT_SEARCH_CONFIG, maxPaidPages: 4,
+    }) as any
 
     expect(result.outcome).toBe('partial_result')
     expect(result.properties).toHaveLength(1)
@@ -601,5 +616,122 @@ describe('executeGatewaySearch', () => {
     expect(result.outcome).toBe('success')
     expect(result.pages_fetched).toBe(1)
     expect(mockAuthorize).toHaveBeenCalledTimes(1)
+  })
+
+  // ─── Pagination contract: has_more metadata ───────────────────────────────
+
+  // PA1: one-page search returns all results → has_more=false
+  it('[PA1] one-page search — all results fit → has_more=false', async () => {
+    mockGetActivePricing.mockResolvedValueOnce(SEARCH_PRICING)
+    mockAuthorize.mockResolvedValueOnce(AUTH_OK)
+    mockPage([RAW_PROPERTY_1], 1)  // total=1, returned=1
+
+    const result = await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID) as any
+
+    expect(result.outcome).toBe('success')
+    expect(result.has_more).toBe(false)
+  })
+
+  // PA2: one-page search, provider has more results → has_more=true
+  it('[PA2] one-page search — provider has more results → has_more=true', async () => {
+    mockGetActivePricing.mockResolvedValueOnce(SEARCH_PRICING)
+    mockAuthorize.mockResolvedValueOnce(AUTH_OK)
+    mockPage([RAW_PROPERTY_1], 500, 2, 250)  // total=500, returned 1 of 500
+
+    const result = await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID) as any
+
+    expect(result.outcome).toBe('success')
+    expect(result.has_more).toBe(true)
+    expect(result.total).toBe(500)
+    expect(result.pages_fetched).toBe(1)
+  })
+
+  // PA3: explicit multi-page fetches exactly two provider calls, has_more=false when exhausted
+  it('[PA3] explicit multi-page — exactly 2 provider calls, has_more=false when market exhausted', async () => {
+    mockGetActivePricing.mockResolvedValueOnce(SEARCH_PRICING)
+    mockAuthorize.mockResolvedValueOnce(AUTH_OK)
+    mockAuthorize.mockResolvedValueOnce(AUTH_OK)
+    mockPage([RAW_PROPERTY_1], 2, 2, 250)  // page 1: total=2, recordCount=250 (more in buffer)
+    mockPage([RAW_PROPERTY_2], 2)           // page 2: total=2, last page
+
+    const result = await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID, {
+      ...DEFAULT_SEARCH_CONFIG, maxPaidPages: 4,
+    }) as any
+
+    expect(result.outcome).toBe('success')
+    expect(result.pages_fetched).toBe(2)
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+    expect(result.has_more).toBe(false)   // fetched all 2 of 2
+  })
+
+  // PA4: billing authorized once per search action — credits only on page 1
+  it('[PA4] explicit multi-page — credits deducted on page 1 only, page 2 credit_cost=0', async () => {
+    mockGetActivePricing.mockResolvedValueOnce(SEARCH_PRICING)
+    mockAuthorize.mockResolvedValueOnce(AUTH_OK)
+    mockAuthorize.mockResolvedValueOnce(AUTH_OK)
+    mockPage([RAW_PROPERTY_1], 300, 2, 250)
+    mockPage([RAW_PROPERTY_2], 300)
+
+    await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID, {
+      ...DEFAULT_SEARCH_CONFIG, maxPaidPages: 4,
+    })
+
+    const calls = mockAuthorize.mock.calls as any[][]
+    expect(calls[0][0].credit_cost).toBe(1)   // page 1 charges the credit
+    expect(calls[1][0].credit_cost).toBe(0)   // page 2 vendor-only, no extra credit
+  })
+
+  // PA5: retry within the same UTC day reuses the same billing_request_id — no duplicate charge
+  it('[PA5] retry same-day — billing_request_id identical, DB handles idempotency', async () => {
+    mockGetActivePricing.mockResolvedValue(SEARCH_PRICING)
+    mockAuthorize.mockResolvedValue(AUTH_OK)
+    mockPage([RAW_PROPERTY_1], 1)
+    mockPage([RAW_PROPERTY_1], 1)  // second call
+
+    await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID)
+    await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID)
+
+    const id1 = (mockAuthorize.mock.calls[0] as any[])[0].request_id
+    const id2 = (mockAuthorize.mock.calls[1] as any[])[0].request_id
+    expect(id1).toBe(id2)  // same ID → fn_reserve_budget_and_credits enforces no double-charge
+  })
+
+  // PA6: safety cap (maxVendorCostCents) stops multi-page before exceeding spend,
+  //      preserves results already fetched, returns correct outcome
+  it('[PA6] safety cap exceeded mid-multi-page — returns success with partial data and has_more=true', async () => {
+    mockGetActivePricing.mockResolvedValueOnce(SEARCH_PRICING)  // 5¢/page
+    mockAuthorize.mockResolvedValueOnce(AUTH_OK)
+    mockPage([RAW_PROPERTY_1], 500, 2, 250)  // page 1 succeeds, more available
+
+    // 5¢+5¢=10¢ which equals 8¢ cap → page 2 blocked by guard before authorize
+    const result = await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID, {
+      ...DEFAULT_SEARCH_CONFIG,
+      maxPaidPages:       4,
+      maxVendorCostCents: 8,
+    }) as any
+
+    expect(result.outcome).toBe('success')       // page 1 succeeded; guard stops page 2 pre-authorize
+    expect(result.pages_fetched).toBe(1)
+    expect(result.has_more).toBe(true)           // 1 of 500 returned
+    expect(mockAuthorize).toHaveBeenCalledTimes(1) // page 2 never authorized
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  // PA7: partial_result carries has_more=true and correct blocked_at_page
+  it('[PA7] partial_result — has_more=true and correct blocked_at_page', async () => {
+    mockGetActivePricing.mockResolvedValueOnce(SEARCH_PRICING)
+    mockAuthorize.mockResolvedValueOnce(AUTH_OK)
+    mockAuthorize.mockResolvedValueOnce(AUTH_CREDIT_BLOCKED)
+    mockPage([RAW_PROPERTY_1], 400, 2, 250)  // page 1 succeeds
+
+    const result = await executeGatewaySearch(SEARCH_PARAMS, BILLING, LOGICAL_SEARCH_ID, {
+      ...DEFAULT_SEARCH_CONFIG, maxPaidPages: 4,
+    }) as any
+
+    expect(result.outcome).toBe('partial_result')
+    expect(result.has_more).toBe(true)
+    expect(result.blocked_at_page).toBe(2)
+    expect(result.properties).toHaveLength(1)
+    expect(result.total).toBe(400)
   })
 })

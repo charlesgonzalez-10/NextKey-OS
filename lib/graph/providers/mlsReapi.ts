@@ -9,6 +9,7 @@
  * Writes are owned by propertyService.getListingIntelligence().
  */
 
+import { randomUUID } from 'crypto'
 import type {
   DsoeProviderDef,
   DsoeProviderResult,
@@ -17,8 +18,12 @@ import type {
   MlsStatus,
   UnifiedPriceHistoryEvent,
 } from '../types'
+import { providerGateway } from '@/lib/billing/providerGateway'
+import { pricingEngine } from '@/lib/billing/pricingEngine'
+import { BACKGROUND_CONTEXT } from '@/lib/billing/gatewayContext'
 
-const REAPI_BASE = 'https://api.realestateapi.com/v2'
+const REAPI_BASE      = 'https://api.realestateapi.com/v2'
+const MLS_FEATURE_KEY = 'property_lookup_basic'
 
 // ── Raw REAPI MLS fields (subset relevant to listing intelligence) ─────────────
 
@@ -167,7 +172,6 @@ function normalizeToUnifiedListing(raw: REAPIListingRaw): UnifiedListing {
 // ── Provider fetch ────────────────────────────────────────────────────────────
 
 async function fetchMlsFromReapi(query: DsoeQuery): Promise<DsoeProviderResult> {
-  const start = Date.now()
   const key = process.env.REAPI_KEY
 
   if (!key) {
@@ -185,6 +189,32 @@ async function fetchMlsFromReapi(query: DsoeQuery): Promise<DsoeProviderResult> 
     return { providerId: 'mls-reapi', data: {}, listing: null, success: false, durationMs: 0, error: 'No folio or address to search' }
   }
 
+  // Gateway: authorize via background pool so every REAPI call is accounted for.
+  // MLS listing lookups triggered by the DSOE router are platform-absorbed enrichment;
+  // user credit billing flows through the calling route (leads/[id]/listing).
+  const request_id = randomUUID()
+  const pricing    = await pricingEngine.getActivePricing(MLS_FEATURE_KEY)
+  if (!pricing?.is_enabled) {
+    return { providerId: 'mls-reapi', data: {}, listing: null, success: false, durationMs: 0, error: 'MLS feature not enabled' }
+  }
+
+  const auth = await providerGateway.authorize({
+    request_id,
+    account_id:           BACKGROUND_CONTEXT.account_id,
+    feature_key:          MLS_FEATURE_KEY,
+    provider_key:         'reapi',
+    pool_key:             BACKGROUND_CONTEXT.pool_key,
+    estimated_cost_cents: pricing.expected_vendor_cost_cents,
+    credit_cost:          0,   // background — no user credits charged
+    is_zero_cost_feature: false,
+  })
+
+  if (!auth.success) {
+    return { providerId: 'mls-reapi', data: {}, listing: null, success: false, durationMs: 0, error: `Budget blocked: ${auth.error_code}` }
+  }
+
+  const start = Date.now()
+
   try {
     const res = await fetch(`${REAPI_BASE}/PropertySearch`, {
       method:  'POST',
@@ -196,6 +226,7 @@ async function fetchMlsFromReapi(query: DsoeQuery): Promise<DsoeProviderResult> 
     const durationMs = Date.now() - start
 
     if (!res.ok) {
+      providerGateway.finalize({ request_id, actual_cost_cents: 0, success: false, error_code: `http_${res.status}`, duration_ms: durationMs }).catch(() => {})
       return {
         providerId: 'mls-reapi',
         data: {},
@@ -210,6 +241,8 @@ async function fetchMlsFromReapi(query: DsoeQuery): Promise<DsoeProviderResult> 
     const raw: REAPIListingRaw | null = Array.isArray(json.data)
       ? (json.data[0] ?? null)
       : (json.data ?? null)
+
+    providerGateway.finalize({ request_id, actual_cost_cents: pricing.expected_vendor_cost_cents, success: true, duration_ms: durationMs }).catch(() => {})
 
     if (!raw) {
       return { providerId: 'mls-reapi', data: {}, listing: null, success: true, durationMs }
@@ -239,12 +272,14 @@ async function fetchMlsFromReapi(query: DsoeQuery): Promise<DsoeProviderResult> 
 
     return { providerId: 'mls-reapi', data, listing, success: true, durationMs }
   } catch (err) {
+    const durationMs = Date.now() - start
+    providerGateway.finalize({ request_id, actual_cost_cents: 0, success: false, error_code: 'timeout_or_error', duration_ms: durationMs }).catch(() => {})
     return {
       providerId: 'mls-reapi',
       data: {},
       listing: null,
       success: false,
-      durationMs: Date.now() - start,
+      durationMs,
       error: err instanceof Error ? err.message : 'Unknown error',
     }
   }

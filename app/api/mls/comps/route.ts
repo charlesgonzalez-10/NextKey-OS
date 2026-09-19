@@ -16,11 +16,13 @@
  *   baths         — exact bathroom count filter
  */
 
+import { randomUUID } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { fetchCompsRentcast, rentcastConfigured, RentcastError, type CompsFilter } from '@/lib/mls/rentcast'
 import { fetchComps, beachesMlsConfigured, BeachesMlsError } from '@/lib/mls/beaches-mls'
 import { geocodeAddress } from '@/lib/mls/geocode'
 import { shouldRefreshModule, markModuleRefreshed } from '@/lib/propertyService'
+import { serviceClient } from '@/lib/supabase-service'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -65,13 +67,40 @@ export async function GET(req: NextRequest) {
     if (!address) {
       return NextResponse.json({ error: 'address param required', code: 'NO_ADDRESS' }, { status: 400 })
     }
+    const t0 = Date.now()
     try {
       const result = await fetchCompsRentcast(address, filter)
+      // Platform-absorbed usage record: Rentcast billing model unconfirmed; treated as
+      // NextKey cost. Recorded so vendor spend is not financially invisible.
+      serviceClient.from('api_usage_events').insert({
+        request_id:           randomUUID(),
+        pool_key:             'background_operations',
+        provider_key:         'rentcast',
+        feature_key:          'rental_analysis',
+        estimated_cost_cents: 5,
+        actual_cost_cents:    5,
+        success:              true,
+        cache_hit:            false,
+        provider_called:      true,
+        duration_ms:          Date.now() - t0,
+      }).then(() => {}, () => {})
       if (propertyId) {
         markModuleRefreshed(propertyId, 'comps', 'rentcast').catch(() => {})
       }
       return NextResponse.json(result)
     } catch (err) {
+      serviceClient.from('api_usage_events').insert({
+        request_id:           randomUUID(),
+        pool_key:             'background_operations',
+        provider_key:         'rentcast',
+        feature_key:          'rental_analysis',
+        estimated_cost_cents: 5,
+        actual_cost_cents:    0,
+        success:              false,
+        cache_hit:            false,
+        provider_called:      true,
+        duration_ms:          Date.now() - t0,
+      }).then(() => {}, () => {})
       if (err instanceof RentcastError) {
         return NextResponse.json({ error: err.message, code: err.code }, { status: err.code === 'QUOTA' ? 402 : 502 })
       }

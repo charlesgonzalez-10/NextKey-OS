@@ -299,6 +299,48 @@ export class CreditWalletService {
     })
   }
 
+  // Expire all active monthly grants for the account, reset the wallet counter to 0,
+  // then grant the new period's allowance. Net effect: available_monthly_credits = amount.
+  // This is the correct semantic for subscription billing cycles — monthly credits reset
+  // rather than accumulate across cycles.
+  async resetAndGrantMonthlyCredits(
+    account_id: string,
+    amount: number,
+    source_id: string,
+    expires_at?: string,
+  ): Promise<CreditGrant> {
+    const wallet = await this.ensureWalletExists(account_id)
+    const currentMonthly = wallet.available_monthly_credits
+
+    // Expire all active monthly grants so the ledger stays clean
+    await serviceClient
+      .from('credit_grants')
+      .update({ status: 'expired', remaining_credits: 0, updated_at: new Date().toISOString() })
+      .eq('account_id', account_id)
+      .eq('grant_type', 'monthly')
+      .eq('status', 'active')
+
+    // Zero the monthly bucket and record one expiry ledger entry for the total reset
+    if (currentMonthly > 0) {
+      await serviceClient
+        .from('credit_wallets')
+        .update({ available_monthly_credits: 0, updated_at: new Date().toISOString() })
+        .eq('account_id', account_id)
+
+      await this.appendTransaction({
+        wallet_id: wallet.id,
+        account_id,
+        transaction_type: 'expiry',
+        credits: -currentMonthly,
+        grant_type_source: 'monthly',
+        internal_note: 'Monthly credit reset on subscription billing cycle',
+      })
+    }
+
+    // Grant new period entitlement (grantCredits re-fetches the now-zeroed wallet)
+    return this.grantCredits(account_id, amount, 'monthly', 'subscription', source_id, expires_at)
+  }
+
   async getActiveGrants(account_id: string): Promise<CreditGrant[]> {
     const { data, error } = await serviceClient
       .from('credit_grants')

@@ -1,3 +1,4 @@
+import crypto from 'crypto'
 import { serviceClient } from '@/lib/supabase-service'
 import type {
   SubscriptionPlan,
@@ -6,6 +7,16 @@ import type {
 } from './types'
 import { creditWalletService } from './creditWalletService'
 import { accountCostCapService } from './accountCostCapService'
+
+// credit_grants.source_id is a uuid column. Stripe IDs (in_..., cs_...) are not UUIDs.
+// Derive a deterministic UUID from any Stripe-format ID so we can store it safely.
+// The same input always produces the same output — idempotency checks stay reliable.
+function stripeIdToSourceUuid(stripeId: string): string {
+  const h = crypto.createHash('sha256').update(stripeId).digest('hex')
+  return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-${['8','9','a','b'][parseInt(h[16],16)%4]}${h.slice(17,20)}-${h.slice(20,32)}`
+}
+
+export { stripeIdToSourceUuid }
 
 export class SubscriptionPlanService {
 
@@ -112,15 +123,15 @@ export class SubscriptionPlanService {
     // Sync cost cap to new plan
     await accountCostCapService.syncCapToSubscription(params.account_id)
 
-    // Grant monthly credits for the new period
+    // Reset prior monthly credits and grant the new plan's allowance for this period.
+    // Using reset (not additive grant) so manual/stale entitlements don't stack with
+    // the paid subscription allowance.
     const plan = await this.getPlanById(params.plan_id)
     if (plan && plan.included_monthly_credits > 0) {
       await creditWalletService.ensureWalletExists(params.account_id)
-      await creditWalletService.grantCredits(
+      await creditWalletService.resetAndGrantMonthlyCredits(
         params.account_id,
         plan.included_monthly_credits,
-        'monthly',
-        'subscription',
         sub.id,
         params.billing_period_end
       )
@@ -129,7 +140,11 @@ export class SubscriptionPlanService {
     return sub
   }
 
-  async renewMonthlyCredits(account_id: string): Promise<void> {
+  // invoice_id: the Stripe invoice ID (in_...) — used as source_id on the grant for
+  // business-level idempotency (one reset+grant per invoice, not per Stripe event ID).
+  // The invoice ID is converted to a deterministic UUID because credit_grants.source_id
+  // is a uuid column; the same invoice always maps to the same UUID so idempotency holds.
+  async renewMonthlyCredits(account_id: string, invoice_id: string): Promise<void> {
     const result = await this.getSubscriptionWithPlan(account_id)
     if (!result) return
 
@@ -137,13 +152,12 @@ export class SubscriptionPlanService {
     if (plan.included_monthly_credits <= 0) return
 
     const billing_period_end = subscription.billing_period_end ?? undefined
+    const sourceId = stripeIdToSourceUuid(invoice_id)
 
-    await creditWalletService.grantCredits(
+    await creditWalletService.resetAndGrantMonthlyCredits(
       account_id,
       plan.included_monthly_credits,
-      'monthly',
-      'subscription',
-      subscription.id,
+      sourceId,
       billing_period_end
     )
   }

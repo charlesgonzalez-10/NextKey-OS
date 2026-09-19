@@ -98,7 +98,17 @@ export class StripePaymentProvider implements IPaymentProvider {
     // one-time payments do not need to save a payment method.
     if (mode === 'subscription') {
       params.payment_method_collection = 'always'
+      // Propagate account_id onto the Stripe subscription object so the
+      // customer.subscription.created/updated webhook can activate the subscription.
+      params.subscription_data = {
+        metadata: { account_id: req.account_id },
+      }
     }
+
+    // Managed Payments requires a product tax_code on both one-time payment and
+    // subscription sessions. Opt out until all products have tax codes in Stripe.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(params as any).managed_payments = { enabled: false }
 
     const session = await stripe.checkout.sessions.create(params, {
       idempotencyKey: req.idempotency_key,

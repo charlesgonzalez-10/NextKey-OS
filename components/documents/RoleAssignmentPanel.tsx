@@ -8,12 +8,14 @@ interface ResolvedRole {
   signer_role_id: string
   role_name:      string
   color:          string
+  auto_suggest:   string | null
   signing_order:  number
   suggestion: {
     name:       string
     email:      string
     phone:      string | null
     contact_id: string | null
+    source?:    string
   } | null
 }
 
@@ -39,13 +41,22 @@ interface Props {
   documentId:   string
   propertyId?:  string | null
   contactId?:   string | null
+  dealId?:      string | null
   onClose:      () => void
   onSent:       (signers: SentSigner[], sessionId: string) => void
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function RoleAssignmentPanel({ documentId, propertyId, contactId, onClose, onSent }: Props) {
+const SOURCE_LABELS: Record<string, string> = {
+  property_owner:      'Property Owner',
+  deal_buyer:          'Deal Buyer',
+  assigned_agent:      'Agent',
+  title_company:       'Title Company',
+  relationship_service:'Linked Contact',
+}
+
+export default function RoleAssignmentPanel({ documentId, propertyId, contactId, dealId, onClose, onSent }: Props) {
   const [loading,   setLoading]   = useState(true)
   const [roles,     setRoles]     = useState<ResolvedRole[]>([])
   const [assigned,  setAssigned]  = useState<AssignedSigner[]>([])
@@ -61,7 +72,7 @@ export default function RoleAssignmentPanel({ documentId, propertyId, contactId,
       const res = await fetch(`/api/documents/${documentId}/resolve-roles`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ property_id: propertyId, contact_id: contactId }),
+        body:    JSON.stringify({ property_id: propertyId, contact_id: contactId, deal_id: dealId }),
       })
       if (!res.ok) { setError('Failed to load roles'); setLoading(false); return }
       const d = await res.json()
@@ -248,7 +259,8 @@ export default function RoleAssignmentPanel({ documentId, propertyId, contactId,
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               {assigned.map((a, idx) => {
                 const role = roles[idx]
-                const hasSuggestion = !!role?.suggestion
+                const suggestion = role?.suggestion
+                const sourceLabel = suggestion?.source ? SOURCE_LABELS[suggestion.source] ?? suggestion.source : null
                 return (
                   <div key={a.signer_role_id} style={{
                     border: '1px solid var(--c-border)',
@@ -266,13 +278,21 @@ export default function RoleAssignmentPanel({ documentId, propertyId, contactId,
                         borderRadius: '50%', backgroundColor: a.color, flexShrink: 0,
                       }} />
                       <span style={{ fontSize: 12, fontWeight: 700 }}>{a.role_name}</span>
-                      {hasSuggestion && (
+                      {sourceLabel ? (
                         <span style={{
                           fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4, marginLeft: 'auto',
                           backgroundColor: 'rgba(74,207,154,0.12)', color: '#4ACF9A',
                           border: '1px solid rgba(74,207,154,0.3)',
                         }}>
-                          Auto-filled
+                          {sourceLabel}
+                        </span>
+                      ) : (
+                        <span style={{
+                          fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4, marginLeft: 'auto',
+                          backgroundColor: 'rgba(239,68,68,0.08)', color: '#ef4444',
+                          border: '1px solid rgba(239,68,68,0.2)',
+                        }}>
+                          Needs Info
                         </span>
                       )}
                     </div>

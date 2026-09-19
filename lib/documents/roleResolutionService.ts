@@ -4,7 +4,8 @@
  *
  * Strategies:
  *   property_owner    → Owner/Seller in contact_properties for this property
- *   deal_buyer        → contact_id passed at generation time, or user profile
+ *   deal_buyer        → ONLY when an explicit contactId is provided at generation time
+ *                       (deals.contact_id is NOT used — it has no buyer/seller semantics)
  *   assigned_agent    → the authenticated user's profile (always the agent)
  *   title_company     → the user's default title company contact
  *   relationship_service → any contact linked to this property (catch-all)
@@ -23,16 +24,20 @@ export interface ResolvedRole {
     email:      string
     phone:      string | null
     contact_id: string | null
+    source:     string  // e.g. 'property_owner' | 'deal_buyer' | 'assigned_agent' | 'title_company' | 'relationship_service'
   } | null
 }
 
 export interface ResolutionContext {
   userId:     string
   propertyId?: string | null
-  contactId?:  string | null  // buyer/primary contact at generation time
+  contactId?:  string | null  // explicit buyer contact established at generation time
+  dealId?:     string | null  // reserved — NOT used to infer buyer (deals.contact_id has no role semantics)
 }
 
-async function suggestPropertyOwner(propertyId: string): Promise<ResolvedRole['suggestion']> {
+type Suggestion = ResolvedRole['suggestion']
+
+async function suggestPropertyOwner(propertyId: string): Promise<Suggestion> {
   const { data } = await serviceClient
     .from('contact_properties')
     .select('contacts(id, name, email, phone)')
@@ -45,39 +50,46 @@ async function suggestPropertyOwner(propertyId: string): Promise<ResolvedRole['s
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const c = (data as any)?.contacts
   if (!c?.name || !c?.email) return null
-  return { name: c.name, email: c.email, phone: c.phone ?? null, contact_id: c.id }
+  return { name: c.name, email: c.email, phone: c.phone ?? null, contact_id: c.id, source: 'property_owner' }
 }
 
-async function suggestDealBuyer(contactId: string | null | undefined, userId: string): Promise<ResolvedRole['suggestion']> {
+// D-2: deals.contact_id has no buyer/seller semantics in the schema.
+// Only an explicit contactId established at document-generation time qualifies
+// as a buyer suggestion. A generic deal link is left unresolved (Needs Info).
+async function suggestDealBuyer(
+  contactId: string | null | undefined,
+  userId: string,
+): Promise<Suggestion> {
   if (contactId) {
     const { data } = await serviceClient
       .from('contacts')
       .select('id, name, email, phone')
       .eq('id', contactId)
       .single()
-    if (data?.email) return { name: data.name ?? '', email: data.email, phone: data.phone ?? null, contact_id: data.id }
+    if (data?.email) return { name: data.name ?? '', email: data.email, phone: data.phone ?? null, contact_id: data.id, source: 'deal_buyer' }
   }
-  // Fall back to agent's profile
+
+  // Fall back to agent's profile when no explicit buyer contact is known
   const { data: p } = await serviceClient
     .from('user_profiles')
     .select('my_name, my_email, my_phone')
     .eq('id', userId)
     .single()
   if (!p?.my_email) return null
-  return { name: p.my_name ?? '', email: p.my_email, phone: p.my_phone ?? null, contact_id: null }
+  return { name: p.my_name ?? '', email: p.my_email, phone: p.my_phone ?? null, contact_id: null, source: 'assigned_agent' }
 }
 
-async function suggestAgent(userId: string): Promise<ResolvedRole['suggestion']> {
+async function suggestAgent(userId: string): Promise<Suggestion> {
   const { data } = await serviceClient
     .from('user_profiles')
     .select('my_name, my_email, my_phone')
     .eq('id', userId)
     .single()
   if (!data?.my_email) return null
-  return { name: data.my_name ?? '', email: data.my_email, phone: data.my_phone ?? null, contact_id: null }
+  return { name: data.my_name ?? '', email: data.my_email, phone: data.my_phone ?? null, contact_id: null, source: 'assigned_agent' }
 }
 
-async function suggestTitleCompany(userId: string): Promise<ResolvedRole['suggestion']> {
+async function suggestTitleCompany(userId: string): Promise<Suggestion> {
   const { data } = await serviceClient
     .from('title_companies')
     .select('company_name, contact_name, email, phone')
@@ -91,10 +103,11 @@ async function suggestTitleCompany(userId: string): Promise<ResolvedRole['sugges
     email:      data.email,
     phone:      data.phone ?? null,
     contact_id: null,
+    source:     'title_company',
   }
 }
 
-async function suggestRelationship(propertyId: string): Promise<ResolvedRole['suggestion']> {
+async function suggestRelationship(propertyId: string): Promise<Suggestion> {
   const { data } = await serviceClient
     .from('contact_properties')
     .select('contacts(id, name, email, phone)')
@@ -106,7 +119,7 @@ async function suggestRelationship(propertyId: string): Promise<ResolvedRole['su
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const c = (data as any)?.contacts
   if (!c?.email) return null
-  return { name: c.name ?? '', email: c.email, phone: c.phone ?? null, contact_id: c.id }
+  return { name: c.name ?? '', email: c.email, phone: c.phone ?? null, contact_id: c.id, source: 'relationship_service' }
 }
 
 /**

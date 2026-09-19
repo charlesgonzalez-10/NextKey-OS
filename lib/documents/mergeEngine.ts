@@ -71,7 +71,7 @@ export function resolveVariable(variable: string, ctx: MergeContext): string {
 
     case '{{Property.Address}}':    return str(property?.property_address)
     case '{{Property.City}}':       return str(property?.city)
-    case '{{Property.State}}':      return 'FL'
+    case '{{Property.State}}':      return str(property?.state)
     case '{{Property.Zip}}':        return str(property?.zip)
     case '{{Property.County}}':     return str(property?.county)
     case '{{Property.Folio}}':      return str(property?.folio_number)

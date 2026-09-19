@@ -91,7 +91,7 @@ function UploadModal({ propertyId, onClose, onUploaded }: { propertyId: string; 
     setLoading(true)
     setError('')
     const fd = new FormData()
-    files.forEach(f => fd.append('files[]', f))
+    files.forEach(f => fd.append('files', f))
     fd.append('property_id', propertyId)
     fd.append('category', category)
     try {

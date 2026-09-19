@@ -22,12 +22,12 @@ export interface BlueprintVersion {
   id: string
   blueprint_id: string
   version_number: number
-  version_label: string
   changelog: string | null
   is_current: boolean
   published_at: string
   published_by: string | null
-  created_at: string
+  field_count: number
+  group_count: number
 }
 
 export interface SignerRole {
@@ -142,23 +142,21 @@ export const BlueprintService = {
     fields: BuilderField[],
     userId?: string,
   ): Promise<BuilderField[]> {
-    const { error: delErr } = await serviceClient
-      .from('template_fields')
-      .delete()
-      .eq('blueprint_id', blueprintId)
-      .is('blueprint_version_id', null)
-    if (delErr) throw new Error(delErr.message)
+    // Use an RPC function so DELETE + INSERT run in a single Postgres transaction.
+    // A failure between them cannot leave the blueprint with zero fields.
+    const rows = fields.map((f, i) => {
+      const r = builderFieldToRow(f, blueprintId, i, userId)
+      return { ...r, field_key: f.id }   // ensure field_key is the stable uuid
+    })
 
-    if (fields.length === 0) return []
-
-    const rows = fields.map((f, i) => builderFieldToRow(f, blueprintId, i, userId))
-
-    const { data, error } = await serviceClient
-      .from('template_fields')
-      .insert(rows)
-      .select('*')
+    const { data, error } = await serviceClient.rpc('sync_blueprint_draft_fields', {
+      p_blueprint_id: blueprintId,
+      p_fields:       rows,
+    })
     if (error) throw new Error(error.message)
-    return (data ?? []).map(r => rowToBuilderField(r as Record<string, unknown>))
+
+    const result: unknown[] = Array.isArray(data) ? data : (data ?? [])
+    return result.map(r => rowToBuilderField(r as Record<string, unknown>))
   },
 
   async publishVersion(
@@ -183,13 +181,12 @@ export const BlueprintService = {
       .update({ is_current: false })
       .eq('blueprint_id', blueprintId)
 
-    // Create the new version row
+    // Create the new version row (no version_label — column does not exist in schema)
     const { data: version, error: vErr } = await serviceClient
       .from('blueprint_versions')
       .insert({
         blueprint_id:   blueprintId,
         version_number: nextNumber,
-        version_label:  `v${nextNumber}.0`,
         changelog:      changelog ?? null,
         is_current:     true,
         published_at:   new Date().toISOString(),

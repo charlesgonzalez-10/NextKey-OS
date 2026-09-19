@@ -18,10 +18,15 @@
  * and the REAPICompRaw interface. NormalizedComp shape must stay stable.
  */
 
+import { randomUUID } from 'crypto'
 import type { CompStatus } from '../types'
+import { providerGateway } from '@/lib/billing/providerGateway'
+import { pricingEngine } from '@/lib/billing/pricingEngine'
+import { BACKGROUND_CONTEXT } from '@/lib/billing/gatewayContext'
 
-const REAPI_BASE      = 'https://api.realestateapi.com/v2'
+const REAPI_BASE       = 'https://api.realestateapi.com/v2'
 const REAPI_COMPS_PATH = '/PropertyComps'
+const COMPS_FEATURE_KEY = 'comps_refresh'
 
 // ── Raw REAPI comp shape ──────────────────────────────────────────────────────
 // Only fields we actually use — extras stay in rawSource.
@@ -187,8 +192,7 @@ export interface CompFetchQuery {
  * Returns an empty comps array (not an error) when REAPI has no results.
  */
 export async function fetchCompsFromReapi(query: CompFetchQuery): Promise<CompFetchResult> {
-  const start = Date.now()
-  const key   = process.env.REAPI_KEY
+  const key = process.env.REAPI_KEY
 
   if (!key) {
     return { comps: [], success: false, durationMs: 0, costCents: 0, error: 'REAPI_KEY not configured' }
@@ -196,6 +200,29 @@ export async function fetchCompsFromReapi(query: CompFetchQuery): Promise<CompFe
 
   if (!query.address && !query.folio) {
     return { comps: [], success: false, durationMs: 0, costCents: 0, error: 'address or folio required' }
+  }
+
+  // Gateway: authorize via background pool. Comps are platform-absorbed enrichment;
+  // this records cost in the background_operations pool so NextKey can measure REAPI spend.
+  const request_id = randomUUID()
+  const pricing    = await pricingEngine.getActivePricing(COMPS_FEATURE_KEY)
+  if (!pricing?.is_enabled) {
+    return { comps: [], success: false, durationMs: 0, costCents: 0, error: 'Comps feature not enabled' }
+  }
+
+  const auth = await providerGateway.authorize({
+    request_id,
+    account_id:           BACKGROUND_CONTEXT.account_id,
+    feature_key:          COMPS_FEATURE_KEY,
+    provider_key:         'reapi',
+    pool_key:             BACKGROUND_CONTEXT.pool_key,
+    estimated_cost_cents: pricing.expected_vendor_cost_cents,
+    credit_cost:          0,
+    is_zero_cost_feature: false,
+  })
+
+  if (!auth.success) {
+    return { comps: [], success: false, durationMs: 0, costCents: 0, error: `Budget blocked: ${auth.error_code}` }
   }
 
   const radius   = Math.min(query.radiusMiles ?? 0.5, 2.0)
@@ -220,14 +247,15 @@ export async function fetchCompsFromReapi(query: CompFetchQuery): Promise<CompFe
   if (query.propertyType) body.propertyType = query.propertyType
 
   if (query.status === 'sold') {
-    body.mlsSold   = true
+    body.mlsSold        = true
     body.soldWithinDays = query.soldWithinDays ?? 180
   } else if (query.status === 'active') {
     body.mlsListingActive = true
   } else if (query.status === 'pending') {
     body.mlsPending = true
   }
-  // no status filter = return mixed
+
+  const start = Date.now()
 
   try {
     const res = await fetch(`${REAPI_BASE}${REAPI_COMPS_PATH}`, {
@@ -240,6 +268,7 @@ export async function fetchCompsFromReapi(query: CompFetchQuery): Promise<CompFe
     const durationMs = Date.now() - start
 
     if (!res.ok) {
+      providerGateway.finalize({ request_id, actual_cost_cents: 0, success: false, error_code: `http_${res.status}`, duration_ms: durationMs }).catch(() => {})
       return {
         comps:      [],
         success:    false,
@@ -258,18 +287,18 @@ export async function fetchCompsFromReapi(query: CompFetchQuery): Promise<CompFe
         : []
 
     const comps = rawResults.map(r => normalizeComp(r, fetchedAt))
+    const costCents = pricing.expected_vendor_cost_cents
 
-    return {
-      comps,
-      success:   true,
-      durationMs,
-      costCents: 5,  // ~$0.05/call — same tier as PropertySearch
-    }
+    providerGateway.finalize({ request_id, actual_cost_cents: costCents, success: true, duration_ms: durationMs }).catch(() => {})
+
+    return { comps, success: true, durationMs, costCents }
   } catch (err) {
+    const durationMs = Date.now() - start
+    providerGateway.finalize({ request_id, actual_cost_cents: 0, success: false, error_code: 'timeout_or_error', duration_ms: durationMs }).catch(() => {})
     return {
       comps:      [],
       success:    false,
-      durationMs: Date.now() - start,
+      durationMs,
       costCents:  0,
       error:      err instanceof Error ? err.message : 'Unknown error',
     }

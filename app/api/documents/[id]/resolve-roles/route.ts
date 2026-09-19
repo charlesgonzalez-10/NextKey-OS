@@ -19,7 +19,7 @@ export async function POST(req: NextRequest, { params }: Params) {
 
   const { data: doc } = await serviceClient
     .from('documents')
-    .select('id, fields_snapshot, property_id, contact_id, created_by')
+    .select('id, fields_snapshot, property_id, contact_id, deal_id, created_by')
     .eq('id', id)
     .single()
 
@@ -29,6 +29,7 @@ export async function POST(req: NextRequest, { params }: Params) {
   const body = await req.json().catch(() => ({}))
   const propertyId = body.property_id ?? doc.property_id ?? null
   const contactId  = body.contact_id  ?? doc.contact_id  ?? null
+  const dealId     = body.deal_id     ?? doc.deal_id     ?? null
 
   // Extract unique signer_role_ids from fields_snapshot
   const snapshot = Array.isArray(doc.fields_snapshot) ? doc.fields_snapshot : []
@@ -44,7 +45,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     return NextResponse.json({ roles: [] })
 
   try {
-    const roles = await resolveRoles(roleIds, { userId: user.id, propertyId, contactId })
+    const roles = await resolveRoles(roleIds, { userId: user.id, propertyId, contactId, dealId })
     return NextResponse.json({ roles })
   } catch (err: unknown) {
     return NextResponse.json({ error: (err as Error).message }, { status: 500 })
