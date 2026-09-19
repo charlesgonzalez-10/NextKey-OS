@@ -20,11 +20,12 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { lookupCaseNumber } from '@/lib/ingestion/reapi-case-lookup'
 import { markModuleRefreshed } from '@/lib/propertyService'
+import { getPropertyByAPN } from '@/lib/enrichment/reapi'
+import { BACKGROUND_CONTEXT } from '@/lib/billing/gatewayContext'
+import type { County } from '@/lib/enrichment/types'
 
 export const dynamic     = 'force-dynamic'
 export const maxDuration = 300
-
-const REAPI_BASE = 'https://api.realestateapi.com/v2'
 
 function getSupabase() {
   return createClient(
@@ -33,27 +34,15 @@ function getSupabase() {
   )
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function fetchREAPIByAPN(apn: string): Promise<Record<string, any> | null> {
-  const key = process.env.REAPI_KEY
-  if (!key) return null
-
-  const res = await fetch(`${REAPI_BASE}/PropertySearch`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': key },
-    body:    JSON.stringify({ apn, state: 'FL', size: 1 }),
-    signal:  AbortSignal.timeout(15_000),
-  })
-
-  if (!res.ok) return null
-  const data = await res.json()
-  return data?.data?.[0] ?? null
-}
-
 export async function GET(request: Request) {
   const authHeader = request.headers.get('authorization')
   if (!process.env.CRON_SECRET || authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  if (process.env.CRON_REFRESH_SAVED_ENABLED === 'false') {
+    console.log('[RefreshSaved] Skipped — CRON_REFRESH_SAVED_ENABLED=false')
+    return NextResponse.json({ status: 'paused', reason: 'cron_disabled' })
   }
 
   const supabase  = getSupabase()
@@ -131,25 +120,47 @@ export async function GET(request: Request) {
   for (const prop of staleProps) {
 
     try {
-      const fresh = await fetchREAPIByAPN(prop.folio_number)
-      if (!fresh) { skipped++; continue }
+      const county  = (prop.county as County) ?? 'broward'
+      const outcome = await getPropertyByAPN(prop.folio_number, county, BACKGROUND_CONTEXT)
 
-      const equityPct = fresh.equityPercent ?? null
-      const mktVal    = fresh.estimatedValue ?? null
-      const debt      = fresh.openMortgageBalance ?? null
+      if (outcome.outcome === 'blocked') {
+        const tag = outcome.error_code === 'pool_exhausted' ? 'background_paused_by_budget' : outcome.error_code
+        console.warn(`[RefreshSaved] REAPI blocked for ${prop.folio_number}: ${tag}`)
+        skipped++
+        continue
+      }
+      if (outcome.outcome === 'provider_failed' || !outcome.data) {
+        skipped++
+        continue
+      }
+
+      // Access raw REAPI fields preserved in the .raw property
+      const fresh = outcome.data.raw as Record<string, unknown>
+
+      const equityPct = fresh.equityPercent as number ?? null
+      const mktVal    = fresh.estimatedValue as number ?? outcome.data.market_value
+      const debt      = fresh.openMortgageBalance as number ?? null
       const equityAmt = mktVal != null && debt != null ? Math.max(0, mktVal - debt) : null
 
       const equityTier =
-        equityPct == null || equityPct <= 0 ? 'None'
-        : equityPct >= 50 ? 'High'
-        : equityPct >= 20 ? 'Medium'
+        equityPct == null || (equityPct as number) <= 0 ? 'None'
+        : (equityPct as number) >= 50 ? 'High'
+        : (equityPct as number) >= 20 ? 'Medium'
         : 'Low'
 
       // ── Case number lookup (for properties that still have null) ──────────
       let caseNumber: string | null = prop.case_number ?? null
       if (!caseNumber && prop.county) {
-        const lookup = await lookupCaseNumber({ apn: prop.folio_number, county: prop.county })
-        if (lookup.case_number) caseNumber = lookup.case_number
+        const lookup = await lookupCaseNumber({
+          apn:    prop.folio_number,
+          county: prop.county,
+          billing: BACKGROUND_CONTEXT,
+        })
+        if (lookup.outcome === 'found') {
+          caseNumber = lookup.case_number
+        } else if (lookup.outcome === 'budget_paused') {
+          console.warn(`[RefreshSaved] case lookup budget_paused for ${prop.folio_number}: ${lookup.error_code}`)
+        }
       }
 
       const { error: updErr } = await supabase
@@ -179,7 +190,6 @@ export async function GET(request: Request) {
         console.error(`[RefreshSaved] ${prop.folio_number}:`, updErr.message)
       } else {
         refreshed++
-        // Mark modules refreshed so the next cron run can skip this property
         void Promise.all([
           markModuleRefreshed(prop.id, 'foreclosure', 'reapi-cron'),
           markModuleRefreshed(prop.id, 'valuation',   'reapi-cron'),

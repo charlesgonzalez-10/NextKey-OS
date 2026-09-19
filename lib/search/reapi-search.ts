@@ -15,6 +15,12 @@
  */
 
 import crypto from 'crypto'
+import type { BillingContext } from '@/lib/billing/gatewayContext'
+import type { AuthorizationResult } from '@/lib/billing/types'
+import { providerGateway } from '@/lib/billing/providerGateway'
+import { pricingEngine } from '@/lib/billing/pricingEngine'
+import { serviceClient } from '@/lib/supabase-service'
+import { providerHealthService } from '@/lib/billing/providerHealth'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -457,52 +463,432 @@ export function buildCacheKey(params: SearchParams): string {
   return crypto.createHash('sha256').update(json).digest('hex').slice(0, 32)
 }
 
-// ─── Execute search ───────────────────────────────────────────────────────────
+// ─── Internal fetch layer ─────────────────────────────────────────────────────
 
 const REAPI_BASE = 'https://api.realestateapi.com/v2'
 
+interface REAPIPageFetch {
+  page:      REAPIProperty[]
+  total:     number
+  returned:  number
+  nextIndex: number
+}
+
+// Typed error thrown when REAPI rejects the call for account-level reasons (402).
+// Distinct from generic provider errors so the route can show a meaningful message.
+export class REAPIProviderAccountError extends Error {
+  readonly code: string
+  constructor(reapiMessage: string, code = 'REAPI_WALLET_INSUFFICIENT') {
+    super(reapiMessage)
+    this.name = 'REAPIProviderAccountError'
+    this.code = code
+  }
+}
+
+async function fetchREAPIPage(
+  apiKey:    string,
+  params:    SearchParams,
+  pageIndex: number,
+  pageSize:  number,
+): Promise<REAPIPageFetch> {
+  const body = buildREAPIBody(params, pageIndex, pageSize)
+  const res = await fetch(`${REAPI_BASE}/PropertySearch`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+    body:    JSON.stringify(body),
+    signal:  AbortSignal.timeout(25_000),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    // REAPI 402 means the REAPI account wallet needs funding — distinct from our billing.
+    if (res.status === 402) {
+      let reapiMsg = 'REAPI account wallet is insufficient. Add funds at console.realestateapi.com/dashboard/billing'
+      try {
+        const j = JSON.parse(text)
+        if (j.message) reapiMsg = `REAPI: ${j.message}`
+      } catch { /* ignore */ }
+      throw new REAPIProviderAccountError(reapiMsg)
+    }
+    throw new Error(`REAPI ${res.status}: ${text.slice(0, 200)}`)
+  }
+  const data: REAPIResponse = await res.json()
+  if (data.statusCode && data.statusCode !== 200) {
+    throw new Error(`REAPI error ${data.statusCode}: ${data.message ?? data.statusMessage}`)
+  }
+  return {
+    page:      data.data ?? [],
+    total:     data.resultCount ?? 0,
+    returned:  data.recordCount ?? (data.data ?? []).length,
+    nextIndex: data.resultIndex ?? pageIndex + pageSize,
+  }
+}
+
+// ─── Gateway search types ─────────────────────────────────────────────────────
+
+export const SEARCH_FEATURE_KEY = 'property_search_criteria'
+
+export interface SearchGatewayConfig {
+  /** Max REAPI pages fetched per user action. */
+  maxPaidPages:        number
+  /** Hard cap on total estimated vendor spend per action (safety guard). */
+  maxVendorCostCents:  number
+  /** Records requested per REAPI page (max 250). */
+  pageSize:            number
+  /** Max records returned to the caller regardless of pages fetched. */
+  maxTotalRecords:     number
+}
+
+export const DEFAULT_SEARCH_CONFIG: SearchGatewayConfig = {
+  maxPaidPages:       1,
+  maxVendorCostCents: 10,   // 1 page × 5¢ + 5¢ margin
+  // 50 records/page: REAPI account wallet supports this size.
+  // Increase to 250 once REAPI account is funded at console.realestateapi.com/dashboard/billing.
+  pageSize:           50,
+  maxTotalRecords:    50,
+}
+
+export type SearchOutcomeCode =
+  | 'success'
+  | 'cache_hit'
+  | 'partial_result'
+  | 'credit_insufficient'
+  | 'account_capacity_limit'
+  | 'customer_pool_exhausted'
+  | 'global_budget_exhausted'
+  | 'provider_disabled'
+  | 'feature_disabled'
+  | 'authorization_unavailable'
+  | 'provider_failed'
+
+export type GatewaySearchOutcome =
+  | { outcome: 'success';        properties: LiveProperty[]; total: number; pages_fetched: number; has_more: boolean }
+  | { outcome: 'partial_result'; properties: LiveProperty[]; total: number; pages_fetched: number; blocked_at_page: number; error_code: SearchOutcomeCode; safe_message: string; has_more: boolean }
+  | { outcome: SearchOutcomeCode; error_code: string; safe_message: string }
+
+function mapAuthToSearchOutcome(auth: AuthorizationResult): SearchOutcomeCode {
+  const ec = auth.error_code ?? ''
+  if (ec === 'insufficient_credits')                                         return 'credit_insufficient'
+  if (ec === 'account_cap_exceeded' || ec === 'no_cost_cap')                 return 'account_capacity_limit'
+  if (ec === 'pool_exhausted' || ec === 'pool_not_found')                    return 'customer_pool_exhausted'
+  if (ec === 'provider_disabled')                                            return 'provider_disabled'
+  if (ec === 'feature_disabled' || ec === 'feature_not_configured'
+      || ec === 'unknown_vendor_cost')                                        return 'feature_disabled'
+  if (ec === 'protected_pool')                                               return 'account_capacity_limit'
+  // Idempotency-key collisions: the request_id already exists in api_budget_reservations.
+  // These are NOT billing-gate failures. Both map to authorization_unavailable so the
+  // route's 503 branch surfaces safe_message to the client. The per-request UUID in
+  // searchSessionId (live/route.ts) prevents these paths in production; this is a
+  // defensive backstop only.
+  if (ec === 'idempotent_duplicate')   return 'authorization_unavailable'
+  if (ec === 'idempotent_in_flight')   return 'authorization_unavailable'
+  if (ec === 'duplicate_request_id')   return 'authorization_unavailable'
+  return 'authorization_unavailable'
+}
+
+// ─── Gateway-enforced live search ─────────────────────────────────────────────
+
 /**
- * Execute a live REAPI search.
- * Fetches ALL pages (up to maxRecords) and returns normalised results.
+ * Build a deterministic billing request ID for a given search page.
+ *
+ * The ID is stable for the same (account, search, page, refreshGen, UTC day):
+ *   - refreshGen=0  — all ordinary retries reuse this ID (no double-charge)
+ *   - refreshGen=N  — explicit user-initiated refresh; gets its own ID so it
+ *                     is a new billable request; duplicate clicks at the same
+ *                     N are still idempotent (same ID → DB blocks duplicate)
+ *
+ * Resets at UTC midnight, aligned with the 24-hour search_cache TTL.
+ *
+ * @param dayEpochOverride  Inject a fixed day epoch (for testing / loop coherence).
+ * @param refreshGen        0 = normal/retry; 1+ = explicit refresh generation.
  */
-export async function executeREAPISearch(
+export function buildBillingRequestId(
+  accountId:         string,
+  logicalSearchId:   string,
+  pageNum:           number,
+  dayEpochOverride?: number,
+  refreshGen:        number = 0,
+): string {
+  const dayEpoch = dayEpochOverride ?? Math.floor(Date.now() / 86_400_000)
+  return crypto
+    .createHash('sha256')
+    .update(`srch:${accountId}:${logicalSearchId}:p${pageNum}:g${refreshGen}:d${dayEpoch}`)
+    .digest('hex')
+    .slice(0, 32)
+}
+
+/**
+ * Execute a live REAPI criteria search through ProviderGateway.
+ *
+ * Authorization:
+ *   - Reserved per page independently, each with a deterministic billing_request_id:
+ *     sha256(account_id:logicalSearchId:page:dayEpoch)[:32]
+ *   - Credit cost charged ONCE per search action (page 1 only; pages 2+ credit_cost=0).
+ *   - Vendor cost estimated per page from the pricing catalog.
+ *   - Idempotent: retrying the same search on the same day reuses the same
+ *     billing_request_id. The DB handles duplicates via fn_reserve_budget_and_credits.
+ *   - idempotent_duplicate (finalized): recover results from search_cache if available.
+ *   - idempotent_in_flight (in-progress): return authorization_unavailable so the
+ *     client retries after the concurrent request completes.
+ *
+ * Partial results:
+ *   - If authorization succeeds for page N but fails for page N+1, the pages
+ *     already retrieved are returned as 'partial_result' — results are never discarded.
+ *   - If page 1 authorization fails, returns the appropriate block outcome
+ *     (credit_insufficient, customer_pool_exhausted, etc.).
+ *
+ * Pool routing:
+ *   - Comes from billing.pool_key (caller decides: customer_shared / owner_reserved
+ *     / background_operations).
+ *   - No automatic spillover between pools.
+ */
+export async function executeGatewaySearch(
+  params:          SearchParams,
+  billing:         BillingContext,
+  logicalSearchId: string,
+  config:          SearchGatewayConfig = DEFAULT_SEARCH_CONFIG,
+  attemptId?:      string,
+  refreshGen:      number = 0,
+): Promise<GatewaySearchOutcome> {
+  const apiKey = process.env.REAPI_KEY
+  if (!apiKey) {
+    return { outcome: 'provider_disabled', error_code: 'provider_not_configured', safe_message: 'Provider is not configured.' }
+  }
+
+  // Fetch pricing once — shared across all pages of this search action
+  const pricing = await pricingEngine.getActivePricing(SEARCH_FEATURE_KEY)
+  if (!pricing) {
+    return { outcome: 'feature_disabled', error_code: 'feature_not_configured', safe_message: 'Search feature has no active pricing.' }
+  }
+  if (!pricing.is_enabled) {
+    return { outcome: 'feature_disabled', error_code: 'feature_disabled', safe_message: pricing.disable_reason ?? 'Search feature is currently disabled.' }
+  }
+  if (pricing.requires_confirmed_cost && pricing.expected_vendor_cost_cents === 0) {
+    return { outcome: 'feature_disabled', error_code: 'unknown_vendor_cost', safe_message: 'Search feature has unconfirmed vendor cost.' }
+  }
+
+  const properties: LiveProperty[] = []
+  const seenIds    = new Set<string>()
+  let pageIndex    = 1
+  let totalInMarket = 0
+  let pagesFetched = 0
+  let vendorSpend  = 0
+  // Compute day epoch once so all pages in this search use the same billing day.
+  const dayEpoch = Math.floor(Date.now() / 86_400_000)
+
+  if (attemptId) {
+    console.info(`[Search] attempt_id=${attemptId} logicalSearchId=${logicalSearchId}`)
+  }
+
+  for (let pageNum = 1; pageNum <= config.maxPaidPages && properties.length < config.maxTotalRecords; pageNum++) {
+    // Hard vendor cost guard — never schedule more spend than the configured max
+    if (vendorSpend + pricing.expected_vendor_cost_cents > config.maxVendorCostCents) break
+
+    // Credits charged only on the first page of each search action
+    const credit_cost = (pageNum === 1 && !billing.is_background)
+      ? pricing.customer_credit_cost
+      : 0
+
+    const request_id = buildBillingRequestId(billing.account_id, logicalSearchId, pageNum, dayEpoch, refreshGen)
+    const start      = Date.now()
+
+    const auth = await providerGateway.authorize({
+      request_id,
+      account_id:           billing.account_id,
+      feature_key:          SEARCH_FEATURE_KEY,
+      provider_key:         'reapi',
+      pool_key:             billing.pool_key,
+      estimated_cost_cents: pricing.expected_vendor_cost_cents,
+      credit_cost,
+      is_zero_cost_feature: false,
+    })
+    if (!auth.success) {
+      const code = mapAuthToSearchOutcome(auth)
+
+      // Idempotency response: the deterministic billing_request_id already exists.
+      // idempotent_duplicate  — billing finalized; check search_cache for lost-response recovery.
+      // idempotent_in_flight  — concurrent request in-progress; tell client to retry.
+      // duplicate_request_id  — application-level 23505 fallback; treat as in-flight.
+      if (auth.error_code === 'idempotent_duplicate') {
+        if (pagesFetched > 0) {
+          return {
+            outcome:         'partial_result',
+            properties,
+            total:           totalInMarket,
+            pages_fetched:   pagesFetched,
+            blocked_at_page: pageNum,
+            error_code:      'authorization_unavailable' as SearchOutcomeCode,
+            safe_message:    'Showing partial results from this search.',
+          }
+        }
+        // Lost-response recovery: billing was finalized but results not returned.
+        // Re-check search_cache so the client gets results without a second provider call.
+        try {
+          const { data: cached } = await serviceClient
+            .from('search_cache')
+            .select('results, result_count')
+            .eq('search_hash', logicalSearchId)
+            .gt('expires_at', new Date().toISOString())
+            .maybeSingle()
+          if (cached && Array.isArray(cached.results) && cached.results.length > 0) {
+            const recovered = (cached.results as LiveProperty[]).slice(0, config.maxTotalRecords)
+            console.info(
+              `[Search] idempotent_duplicate — recovered ${recovered.length} results from cache ` +
+              `request_id=${request_id} logicalSearchId=${logicalSearchId}`
+            )
+            return { outcome: 'success', properties: recovered, total: cached.result_count as number, pages_fetched: 0, has_more: recovered.length < (cached.result_count as number) }
+          }
+        } catch {
+          // Cache unavailable — fall through to error
+        }
+        console.error(
+          `[Search] idempotent_duplicate — no cache entry for logicalSearchId=${logicalSearchId} ` +
+          `request_id=${request_id}. Provider was billed but results not cached.`
+        )
+        return {
+          outcome:      'authorization_unavailable',
+          error_code:   'idempotent_duplicate',
+          safe_message: 'This search was recently completed. Please try again in a moment.',
+        }
+      }
+
+      if (auth.error_code === 'idempotent_in_flight' || auth.error_code === 'duplicate_request_id') {
+        console.info(
+          `[Search] ${auth.error_code} — request_id=${request_id} page=${pageNum} ` +
+          `is in-progress from a concurrent request. pages_fetched=${pagesFetched}`
+        )
+        if (pagesFetched > 0) {
+          return {
+            outcome:         'partial_result',
+            properties,
+            total:           totalInMarket,
+            pages_fetched:   pagesFetched,
+            blocked_at_page: pageNum,
+            error_code:      'authorization_unavailable' as SearchOutcomeCode,
+            safe_message:    'Showing partial results. A concurrent search is in progress.',
+            has_more:        true,
+          }
+        }
+        return {
+          outcome:      'authorization_unavailable',
+          error_code:   auth.error_code,
+          safe_message: 'Search is already in progress. Please wait a moment and try again.',
+        }
+      }
+
+      if (pagesFetched > 0) {
+        return {
+          outcome:         'partial_result',
+          properties,
+          total:           totalInMarket,
+          pages_fetched:   pagesFetched,
+          blocked_at_page: pageNum,
+          error_code:      code,
+          safe_message:    auth.error_message ?? 'Budget reached. Showing partial results.',
+          has_more:        true,
+        }
+      }
+      return {
+        outcome:      code,
+        error_code:   auth.error_code    ?? 'authorization_failed',
+        safe_message: auth.error_message ?? 'This feature is currently unavailable.',
+      }
+    }
+
+    try {
+      const pageSize = Math.min(config.pageSize, config.maxTotalRecords - properties.length)
+      const fetched  = await fetchREAPIPage(apiKey, params, pageIndex, pageSize)
+
+      totalInMarket = fetched.total
+      for (const p of fetched.page) {
+        const norm = normaliseREAPIProperty(p)
+        if (!seenIds.has(norm.id)) {
+          seenIds.add(norm.id)
+          properties.push(norm)
+        }
+      }
+
+      pagesFetched++
+      vendorSpend += pricing.expected_vendor_cost_cents
+
+      providerHealthService.recordSuccess('reapi').catch(() => {})
+
+      providerGateway.finalize({
+        request_id,
+        actual_cost_cents: pricing.expected_vendor_cost_cents,
+        success:           true,
+        duration_ms:       Date.now() - start,
+      }).catch(e => console.error('[Search] finalize error:', e))
+
+      // Stop if REAPI has no more results
+      if (properties.length >= totalInMarket || fetched.returned < pageSize || fetched.page.length === 0) break
+      pageIndex = fetched.nextIndex
+
+    } catch (err) {
+      const errMsg    = err instanceof Error ? err.message : String(err)
+      const isAccount = err instanceof REAPIProviderAccountError
+      const errCode   = isAccount ? 'reapi_account_insufficient' : 'provider_error'
+      console.error(`[Search] REAPI page ${pageNum} failed (${errCode}):`, errMsg)
+
+      // Record health event — fire-and-forget; never blocks the response path
+      if (isAccount) {
+        providerHealthService.recordHttpError('reapi', 402, errMsg).catch(() => {})
+      } else {
+        providerHealthService.recordEvent({ provider_key: 'reapi', status: 'server_error', error_category: 'provider_server_error', detail: errMsg }).catch(() => {})
+      }
+
+      providerGateway.finalize({
+        request_id,
+        actual_cost_cents: 0,
+        success:           false,
+        error_code:        errCode,
+        duration_ms:       Date.now() - start,
+      }).catch(() => {})
+
+      if (pagesFetched > 0) {
+        return {
+          outcome:         'partial_result',
+          properties,
+          total:           totalInMarket,
+          pages_fetched:   pagesFetched,
+          blocked_at_page: pageNum,
+          error_code:      isAccount ? 'reapi_account_insufficient' : 'provider_failed',
+          safe_message:    isAccount ? errMsg : 'Provider error. Showing partial results.',
+          has_more:        true,
+        }
+      }
+      return {
+        outcome:      isAccount ? 'provider_disabled' : 'provider_failed',
+        error_code:   errCode,
+        safe_message: errMsg,
+      }
+    }
+  }
+
+  return { outcome: 'success', properties, total: totalInMarket, pages_fetched: pagesFetched, has_more: properties.length < totalInMarket }
+}
+
+// ─── Legacy unguarded search (internal — not exported) ───────────────────────
+// Kept as a reference implementation; no longer called from live/route.ts.
+// Do not use in new code — use executeGatewaySearch instead.
+
+async function executeREAPISearch(
   params: SearchParams,
-  maxRecords = 500    // cap to control costs per search
+  maxRecords = 500
 ): Promise<{ results: LiveProperty[]; total: number }> {
   const key = process.env.REAPI_KEY
   if (!key) throw new Error('REAPI_KEY is not configured')
 
   const results: LiveProperty[] = []
   const seenIds = new Set<string>()
-  let resultIndex = 1
+  let pageIndex = 1
   let total = 0
 
   while (results.length < maxRecords) {
-    const body = buildREAPIBody(params, resultIndex)
     const pageSize = Math.min(250, maxRecords - results.length)
-    body.size = pageSize
+    const fetched  = await fetchREAPIPage(key, params, pageIndex, pageSize)
+    total = fetched.total
 
-    const res = await fetch(`${REAPI_BASE}/PropertySearch`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': key },
-      body:    JSON.stringify(body),
-      signal:  AbortSignal.timeout(25_000),
-    })
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      throw new Error(`REAPI ${res.status}: ${text.slice(0, 200)}`)
-    }
-
-    const data: REAPIResponse = await res.json()
-    if (data.statusCode && data.statusCode !== 200) {
-      throw new Error(`REAPI error ${data.statusCode}: ${data.message ?? data.statusMessage}`)
-    }
-
-    total = data.resultCount ?? 0
-    const page = data.data ?? []
-
-    for (const p of page) {
+    for (const p of fetched.page) {
       const norm = normaliseREAPIProperty(p)
       if (!seenIds.has(norm.id)) {
         seenIds.add(norm.id)
@@ -510,10 +896,12 @@ export async function executeREAPISearch(
       }
     }
 
-    const returned = data.recordCount ?? page.length
-    if (results.length >= total || returned < pageSize || page.length === 0) break
-    resultIndex = data.resultIndex ?? resultIndex + pageSize
+    if (results.length >= total || fetched.returned < pageSize || fetched.page.length === 0) break
+    pageIndex = fetched.nextIndex
   }
 
   return { results, total }
 }
+
+// Prevent accidental import — suppress "unused variable" lint
+void executeREAPISearch

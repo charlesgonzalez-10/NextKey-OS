@@ -1,10 +1,12 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
+import type React from 'react'
 import { useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 
-const DocumentViewer = dynamic(() => import('@/components/DocumentViewer'), { ssr: false })
+const DocumentViewer       = dynamic(() => import('@/components/DocumentViewer'), { ssr: false })
+const RoleAssignmentPanel  = dynamic(() => import('@/components/documents/RoleAssignmentPanel') as Promise<{ default: React.ComponentType<{ documentId: string; propertyId?: string | null; contactId?: string | null; dealId?: string | null; onClose: () => void; onSent: (signers: unknown[], sessionId: string) => void }> }>, { ssr: false })
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -28,6 +30,8 @@ interface Doc {
   deal_id: string | null
   property_id: string | null
   contact_id: string | null
+  blueprint_version_id: string | null
+  fields_snapshot: unknown[] | null
 }
 
 interface SigningRequest {
@@ -328,6 +332,7 @@ export default function DocDetailClient({ docId }: { docId: string }) {
   const [viewer, setViewer]         = useState<{ url: string; fileType: string | null } | null>(null)
   const [showSend,       setShowSend]       = useState(false)
   const [showSignReq,    setShowSignReq]    = useState(false)
+  const [showRolePanel,  setShowRolePanel]  = useState(false)
   const [signingRequests, setSigningRequests] = useState<SigningRequest[]>([])
   const [advancing,      setAdvancing]      = useState(false)
   const [activeTab,      setActiveTab]      = useState<'versions' | 'activity' | 'signatures'>('activity')
@@ -573,7 +578,8 @@ export default function DocDetailClient({ docId }: { docId: string }) {
               signingRequests.length === 0 ? (
                 <div style={{ padding: '24px 16px', textAlign: 'center' }}>
                   <p style={{ fontSize: 12, color: 'var(--c-text-3)', marginBottom: 10 }}>No signing requests yet</p>
-                  <button onClick={() => setShowSignReq(true)}
+                  <button
+                    onClick={() => doc?.blueprint_version_id ? setShowRolePanel(true) : setShowSignReq(true)}
                     style={{ fontSize: 11, padding: '5px 14px', borderRadius: 6, backgroundColor: 'rgba(201,168,76,0.1)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.25)', cursor: 'pointer' }}>
                     ✍️ Request Signature
                   </button>
@@ -602,7 +608,8 @@ export default function DocDetailClient({ docId }: { docId: string }) {
                       </div>
                     )
                   })}
-                  <button onClick={() => setShowSignReq(true)}
+                  <button
+                    onClick={() => doc?.blueprint_version_id ? setShowRolePanel(true) : setShowSignReq(true)}
                     style={{ fontSize: 11, padding: '6px 0', borderRadius: 6, border: '1px dashed var(--c-border)', backgroundColor: 'transparent', color: 'var(--c-text-2)', cursor: 'pointer', marginTop: 4 }}>
                     + New Request
                   </button>
@@ -677,6 +684,21 @@ export default function DocDetailClient({ docId }: { docId: string }) {
           onClose={() => setShowSignReq(false)}
           onCreated={(req) => {
             setSigningRequests(prev => [req, ...prev])
+            setActiveTab('signatures')
+            setDoc(prev => prev ? { ...prev, status: 'sent', sent_at: new Date().toISOString() } : prev)
+          }}
+        />
+      )}
+
+      {showRolePanel && doc && (
+        <RoleAssignmentPanel
+          documentId={doc.id}
+          propertyId={doc.property_id}
+          contactId={doc.contact_id}
+          dealId={doc.deal_id}
+          onClose={() => setShowRolePanel(false)}
+          onSent={(_signers) => {
+            setShowRolePanel(false)
             setActiveTab('signatures')
             setDoc(prev => prev ? { ...prev, status: 'sent', sent_at: new Date().toISOString() } : prev)
           }}

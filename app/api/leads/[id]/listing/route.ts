@@ -2,23 +2,19 @@
  * GET /api/leads/[id]/listing
  *
  * Returns MLS listing data for a property.
- * Sources (in priority order):
- *   1. properties table mls_* columns (if already saved)
- *   2. raw_reapi JSONB column (extract MLS fields from stored REAPI response)
+ * Reads from properties.mls_* columns, which are kept current by the
+ * one-way sync from listing_intelligence after every refresh.
  *
  * POST /api/leads/[id]/listing
- *   Body: { fetch_fresh?: boolean }
- *   Fetches fresh REAPI listing data and saves to properties table.
+ *   Body: { fetch_fresh?: boolean, force?: boolean }
+ *   Routes through getListingIntelligence(), which is the canonical write
+ *   path: fetches REAPI via DSOE, processes price history + listing cycle +
+ *   signals + scoring, upserts listing_intelligence, and syncs mls_* columns.
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { serviceClient } from '@/lib/supabase-service'
-import {
-  shouldRefreshModule,
-  snapshotBeforeUpdate,
-  markModuleRefreshed,
-  accumulateMarketData,
-} from '@/lib/propertyService'
+import { getListingIntelligence } from '@/lib/propertyService'
 
 export const dynamic = 'force-dynamic'
 
@@ -115,69 +111,16 @@ export async function POST(
 
   if (!body.fetch_fresh) return NextResponse.json({ ok: true })
 
-  // Check MLS freshness — active listings refresh daily, others weekly
-  const { data: mlsMeta } = await serviceClient
-    .from('properties')
-    .select('mls_active')
-    .eq('id', id)
-    .single()
-  const isActive     = mlsMeta?.mls_active === true
-  const needsRefresh = await shouldRefreshModule(id, 'mls', { isActiveListing: isActive })
-  if (!needsRefresh && !body.force) {
-    return NextResponse.json({ ok: true, cached: true, message: 'MLS data is fresh' })
+  // Delegate entirely to the canonical write path.
+  // getListingIntelligence() handles TTL caching, DSOE routing, price history,
+  // listing cycle, signal derivation, scoring, and the mls_* sync projection.
+  const listing = await getListingIntelligence(id, { force: !!body.force })
+
+  if (!listing) {
+    return NextResponse.json({ listing: null, message: 'No MLS data found' })
   }
 
-  const key = process.env.REAPI_KEY
-  if (!key) return NextResponse.json({ error: 'REAPI not configured' }, { status: 503 })
-
-  const { data: prop } = await serviceClient
-    .from('properties')
-    .select('property_address, folio_number')
-    .eq('id', id)
-    .single()
-
-  if (!prop) return NextResponse.json({ error: 'Not found' }, { status: 404 })
-
-  const searchBody: Record<string, unknown> = { size: 1, mlsListingActive: true }
-  if (prop.folio_number) searchBody.apn = prop.folio_number.replace(/\D/g, '')
-  else searchBody.address = prop.property_address
-
-  const res = await fetch('https://api.realestateapi.com/v2/PropertySearch', {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': key },
-    body:    JSON.stringify(searchBody),
-    signal:  AbortSignal.timeout(12_000),
-  })
-
-  if (!res.ok) return NextResponse.json({ error: `REAPI ${res.status}` }, { status: 502 })
-
-  const data = await res.json()
-  const raw  = data.data?.[0]
-  if (!raw)   return NextResponse.json({ listing: null })
-
-  // Extract and save MLS fields from REAPI response
-  const updates: Record<string, unknown> = {
-    mls_status:        raw.mlsStatus        ?? null,
-    mls_listing_price: raw.mlsListingPrice  ?? null,
-    mls_active:        raw.mlsActive        ?? false,
-    mls_dom:           raw.daysOnMarket     ?? null,
-    raw_reapi:         raw,
-    enrichment_src:    'reapi',
-  }
-
-  await snapshotBeforeUpdate(id, 'mls', 'reapi')
-  await serviceClient.from('properties').update(updates).eq('id', id)
-  await markModuleRefreshed(id, 'mls', 'reapi').catch(() => {})
-
-  accumulateMarketData({
-    mls_listing_price:    raw.mlsListingPrice ?? null,
-    mls_dom:              raw.daysOnMarket ?? null,
-    mls_price_reductions: raw.priceReductions ?? null,
-    propertyId: id,
-    source:     'reapi',
-  })
-
-  return NextResponse.json({ ok: true, updates_count: Object.keys(updates).length })
+  return NextResponse.json({ ok: true, listing })
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

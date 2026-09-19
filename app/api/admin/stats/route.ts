@@ -128,6 +128,75 @@ async function getMessageStats() {
   }
 }
 
+async function getBillingStats() {
+  const periodStart = new Date()
+  periodStart.setDate(1)
+  periodStart.setHours(0, 0, 0, 0)
+  const periodStartIso = periodStart.toISOString()
+
+  const [poolsResult, usageResult, reservationsResult, walletsResult] = await Promise.all([
+    serviceClient.from('api_budget_pools')
+      .select('pool_key, pool_name, monthly_limit_cents, spent_this_period_cents, is_protected, is_active')
+      .order('monthly_limit_cents', { ascending: false }),
+    serviceClient.from('api_usage_events')
+      .select('provider_key, actual_cost_cents, created_at')
+      .gte('created_at', periodStartIso),
+    serviceClient.from('api_budget_reservations')
+      .select('estimated_cost_cents')
+      .eq('status', 'reserved'),
+    serviceClient.from('credit_wallets')
+      .select('available_monthly_credits, available_purchased_credits, available_bonus_credits, reserved_credits'),
+  ])
+
+  const pools = (poolsResult.data ?? []).map(p => ({
+    ...p,
+    utilization_pct: p.monthly_limit_cents > 0
+      ? Math.round((p.spent_this_period_cents / p.monthly_limit_cents) * 100)
+      : 0,
+  }))
+
+  const usageEvents = usageResult.data ?? []
+  const byProviderMap: Record<string, { events: number; cost_cents: number }> = {}
+  let totalCostCents = 0
+  for (const e of usageEvents) {
+    const key = e.provider_key ?? 'unknown'
+    if (!byProviderMap[key]) byProviderMap[key] = { events: 0, cost_cents: 0 }
+    byProviderMap[key].events++
+    byProviderMap[key].cost_cents += e.actual_cost_cents ?? 0
+    totalCostCents += e.actual_cost_cents ?? 0
+  }
+  const byProvider = Object.entries(byProviderMap).map(([provider_key, v]) => ({ provider_key, ...v }))
+
+  const reservations = reservationsResult.data ?? []
+  const totalReservedCents = reservations.reduce((s, r) => s + (r.estimated_cost_cents ?? 0), 0)
+
+  const wallets = walletsResult.data ?? []
+  let totalAvailableCredits = 0
+  let totalReservedCredits = 0
+  for (const w of wallets) {
+    totalAvailableCredits += (w.available_monthly_credits ?? 0) + (w.available_purchased_credits ?? 0) + (w.available_bonus_credits ?? 0) - (w.reserved_credits ?? 0)
+    totalReservedCredits += w.reserved_credits ?? 0
+  }
+
+  return {
+    pools,
+    usage_this_period: {
+      total_events:    usageEvents.length,
+      total_cost_cents: totalCostCents,
+      by_provider:     byProvider,
+    },
+    active_reservations: {
+      count:               reservations.length,
+      total_reserved_cents: totalReservedCents,
+    },
+    credit_overview: {
+      total_wallets:           wallets.length,
+      total_available_credits: Math.max(0, totalAvailableCredits),
+      total_reserved_credits:  totalReservedCredits,
+    },
+  }
+}
+
 function getEnvStatus() {
   return {
     supabase:        !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
@@ -153,21 +222,23 @@ export async function GET() {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const [db, twilio, jobs, gmail, sms] = await Promise.allSettled([
+  const [db, twilio, jobs, gmail, sms, billing] = await Promise.allSettled([
     getDbStats(),
     getTwilioStats(),
     getJobStats(),
     getGmailStatus(),
     getMessageStats(),
+    getBillingStats(),
   ])
 
   return NextResponse.json({
     generated_at: new Date().toISOString(),
-    db:    db.status    === 'fulfilled' ? db.value    : { error: 'Failed' },
-    twilio: twilio.status === 'fulfilled' ? twilio.value : { error: 'Failed' },
-    jobs:  jobs.status  === 'fulfilled' ? jobs.value  : { error: 'Failed' },
-    gmail: gmail.status === 'fulfilled' ? gmail.value : [],
-    sms:   sms.status   === 'fulfilled' ? sms.value   : { error: 'Failed' },
-    env:   getEnvStatus(),
+    db:      db.status      === 'fulfilled' ? db.value      : { error: 'Failed' },
+    twilio:  twilio.status  === 'fulfilled' ? twilio.value  : { error: 'Failed' },
+    jobs:    jobs.status    === 'fulfilled' ? jobs.value    : { error: 'Failed' },
+    gmail:   gmail.status   === 'fulfilled' ? gmail.value   : [],
+    sms:     sms.status     === 'fulfilled' ? sms.value     : { error: 'Failed' },
+    billing: billing.status === 'fulfilled' ? billing.value : { error: 'Failed' },
+    env:     getEnvStatus(),
   })
 }

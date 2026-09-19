@@ -17,6 +17,7 @@ import { createClient } from '@supabase/supabase-js'
 import { detectEntityType } from '@/lib/scrapers/utils'
 import type { LiveProperty } from '@/lib/search/reapi-search'
 import { lookupCaseNumber } from '@/lib/ingestion/reapi-case-lookup'
+import { BACKGROUND_CONTEXT } from '@/lib/billing/gatewayContext'
 
 export const dynamic = 'force-dynamic'
 
@@ -148,21 +149,29 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Look up real court case number from REAPI PropertyDetail ────────────
-  // Fires async — if we already have a case number, skip
   if (prop.folio_number && prop.county) {
-    const { case_number, foreclosure_history } = await lookupCaseNumber({
-      apn:    prop.folio_number,
-      county: prop.county,
+    const lookup = await lookupCaseNumber({
+      apn:                 prop.folio_number,
+      county:              prop.county,
+      existingCaseNumber:  payload.case_number,
+      billing:             BACKGROUND_CONTEXT,
     })
 
-    if (case_number) {
+    if (lookup.outcome === 'found') {
       await supabase.from('properties').update({
-        case_number,
-        // Also store the full foreclosure history in raw_reapi extension
-        raw_reapi: { ...(prop._raw ?? {}), foreclosureInfo: foreclosure_history },
+        case_number: lookup.case_number,
+        raw_reapi: { ...(prop._raw ?? {}), foreclosureInfo: lookup.foreclosure_history },
         updated_at: new Date().toISOString(),
       }).eq('id', propertyId)
+    } else if (lookup.outcome === 'not_found') {
+      await supabase.from('properties').update({
+        raw_reapi: { ...(prop._raw ?? {}), foreclosureInfo: lookup.foreclosure_history },
+        updated_at: new Date().toISOString(),
+      }).eq('id', propertyId)
+    } else if (lookup.outcome === 'budget_paused') {
+      console.warn(`[Properties/Save] case lookup budget_paused for ${prop.folio_number}: ${lookup.error_code}`)
     }
+    // 'skipped', 'provider_failed', 'feature_disabled' — no action needed
   }
 
   // ── Ensure a leads entry exists ──────────────────────────────────────────

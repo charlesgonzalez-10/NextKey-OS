@@ -1,34 +1,38 @@
 /**
- * REAPI Case Number Lookup
+ * REAPI Case Number Lookup — Gateway-enforced
  *
- * Calls REAPI /v2/PropertyDetail for a given APN + FIPS and extracts
- * the most relevant court case number from the foreclosureInfo array.
- *
- * REAPI PropertyDetail returns a `foreclosureInfo` array where each entry
- * has a `caseNumber` field (e.g. "CACE-25-006991" for Broward).
- * Coverage: ~40–60% for Broward, lower for Miami-Dade.
- *
- * Usage:
- *   const caseNum = await lookupCaseNumber({ apn: '50-41-05-30-0280', county: 'broward' })
- *   // → "CACE-25-006991" | null
+ * Routes every /PropertyDetail call through ProviderGateway.
+ * Pool:    background_operations (default) — no customer credits.
+ * Cost:    5¢ per call (property_detail_lookup feature).
+ * Idempotency: request_id = case-{md5(apn+fips)}-{minute} — retries within
+ *              the same minute reuse the same ID (DB UNIQUE constraint blocks
+ *              double-charging on concurrent retry).
+ * Fail-closed: if pricing unavailable or budget exhausted → budget_paused, not error.
+ * Skip-if-known: if existingCaseNumber is supplied → skipped immediately (0 cost).
  */
 
-const REAPI_BASE = 'https://api.realestateapi.com/v2'
+import crypto from 'crypto'
+import type { BillingContext } from '@/lib/billing/gatewayContext'
+import { providerGateway } from '@/lib/billing/providerGateway'
+import { pricingEngine } from '@/lib/billing/pricingEngine'
+import { BACKGROUND_CONTEXT } from '@/lib/billing/gatewayContext'
 
-/** FIPS code for each South Florida county */
+const REAPI_BASE = 'https://api.realestateapi.com/v2'
+export const CASE_LOOKUP_FEATURE_KEY = 'property_detail_lookup'
+
 const COUNTY_FIPS: Record<string, string> = {
   'broward':    '12011',
   'miami-dade': '12086',
   'palm-beach': '12099',
 }
 
-interface ForeclosureInfoEntry {
-  active?:        boolean
-  caseNumber?:    string | null
-  noticeType?:    string | null
-  recordingDate?: string | null
-  documentType?:  string | null
-  lenderName?:    string | null
+export interface ForeclosureInfoEntry {
+  active?:         boolean
+  caseNumber?:     string | null
+  noticeType?:     string | null
+  recordingDate?:  string | null
+  documentType?:   string | null
+  lenderName?:     string | null
   judgmentAmount?: string | null
   defaultAmount?:  string | null
   openingBid?:     number | null
@@ -36,18 +40,10 @@ interface ForeclosureInfoEntry {
   seqNo?:          number
 }
 
-/**
- * Pick the single best case number from a foreclosureInfo array.
- * Priority:
- *   1. Most recent recording date with a valid case number
- *   2. Prefer entries with actual CACE/CONO/DOM format case numbers
- *   3. Never return an empty string or null
- */
 function pickBestCaseNumber(entries: ForeclosureInfoEntry[]): string | null {
   const withCase = entries.filter(e => e.caseNumber && e.caseNumber.trim())
   if (withCase.length === 0) return null
 
-  // Sort by recordingDate descending (most recent first)
   withCase.sort((a, b) => {
     const da = a.recordingDate ? new Date(a.recordingDate).getTime() : 0
     const db = b.recordingDate ? new Date(b.recordingDate).getTime() : 0
@@ -57,21 +53,72 @@ function pickBestCaseNumber(entries: ForeclosureInfoEntry[]): string | null {
   return withCase[0].caseNumber!.trim()
 }
 
-export interface CaseLookupResult {
-  case_number:   string | null
-  /** All foreclosure history entries from REAPI */
-  foreclosure_history: ForeclosureInfoEntry[]
-}
+export type CaseLookupOutcome =
+  | { outcome: 'found';            case_number: string; foreclosure_history: ForeclosureInfoEntry[]; request_id: string }
+  | { outcome: 'not_found';        foreclosure_history: ForeclosureInfoEntry[]; request_id: string }
+  | { outcome: 'budget_paused';    error_code: string; safe_message: string }
+  | { outcome: 'provider_failed';  error: string }
+  | { outcome: 'feature_disabled'; error_code: string }
+  | { outcome: 'skipped';          reason: string }
 
 export async function lookupCaseNumber(params: {
-  apn:    string
-  county: string
-}): Promise<CaseLookupResult> {
+  apn:                 string
+  county:              string
+  existingCaseNumber?: string | null
+  billing?:            BillingContext
+}): Promise<CaseLookupOutcome> {
+  // Skip when we already have a case number — 0 cost
+  if (params.existingCaseNumber) {
+    return { outcome: 'skipped', reason: 'already_known' }
+  }
+
+  const billing = params.billing ?? BACKGROUND_CONTEXT
+
   const key = process.env.REAPI_KEY
-  if (!key) return { case_number: null, foreclosure_history: [] }
+  if (!key) {
+    return { outcome: 'feature_disabled', error_code: 'provider_not_configured' }
+  }
 
   const fips = COUNTY_FIPS[params.county.toLowerCase()]
-  if (!fips) return { case_number: null, foreclosure_history: [] }
+  if (!fips) {
+    return { outcome: 'skipped', reason: 'unsupported_county' }
+  }
+
+  // Pricing — fail closed if unknown/disabled
+  const pricing = await pricingEngine.getActivePricing(CASE_LOOKUP_FEATURE_KEY)
+  if (!pricing) {
+    return { outcome: 'feature_disabled', error_code: 'feature_not_configured' }
+  }
+  if (!pricing.is_enabled) {
+    return { outcome: 'feature_disabled', error_code: 'feature_disabled' }
+  }
+  if (pricing.requires_confirmed_cost && pricing.expected_vendor_cost_cents === 0) {
+    return { outcome: 'feature_disabled', error_code: 'unknown_vendor_cost' }
+  }
+
+  // Idempotency key — minute-granular to absorb same-minute retries
+  const hash = crypto.createHash('md5').update(`${params.apn}:${fips}`).digest('hex').slice(0, 8)
+  const request_id = `case-${hash}-${Math.floor(Date.now() / 60_000)}`
+  const start = Date.now()
+
+  const auth = await providerGateway.authorize({
+    request_id,
+    account_id:           billing.account_id,
+    feature_key:          CASE_LOOKUP_FEATURE_KEY,
+    provider_key:         'reapi',
+    pool_key:             billing.pool_key,
+    estimated_cost_cents: pricing.expected_vendor_cost_cents,
+    credit_cost:          0,   // case lookup never charges customer credits
+    is_zero_cost_feature: false,
+  })
+
+  if (!auth.success) {
+    return {
+      outcome:      'budget_paused',
+      error_code:   auth.error_code    ?? 'authorization_failed',
+      safe_message: auth.error_message ?? 'Budget unavailable for case lookup.',
+    }
+  }
 
   try {
     const res = await fetch(`${REAPI_BASE}/PropertyDetail`, {
@@ -82,29 +129,44 @@ export async function lookupCaseNumber(params: {
     })
 
     if (!res.ok) {
-      console.warn(`[CaseLookup] PropertyDetail HTTP ${res.status} for ${params.apn}`)
-      return { case_number: null, foreclosure_history: [] }
+      const text = await res.text().catch(() => '')
+      throw new Error(`REAPI HTTP ${res.status}: ${text.slice(0, 100)}`)
     }
 
     const data = await res.json()
-
-    // PropertyDetail can return data as an object or array
     const detail = Array.isArray(data.data) ? data.data[0] : data.data
-    if (!detail) return { case_number: null, foreclosure_history: [] }
 
-    const foreclosureInfo: ForeclosureInfoEntry[] = detail.foreclosureInfo ?? []
+    const foreclosureInfo: ForeclosureInfoEntry[] = detail?.foreclosureInfo ?? []
     const case_number = pickBestCaseNumber(foreclosureInfo)
 
+    providerGateway.finalize({
+      request_id,
+      actual_cost_cents: pricing.expected_vendor_cost_cents,
+      success:           true,
+      duration_ms:       Date.now() - start,
+    }).catch(e => console.error('[CaseLookup] finalize error:', e))
+
     if (case_number) {
-      console.log(`[CaseLookup] Found case number ${case_number} for ${params.apn}`)
-    } else {
-      console.log(`[CaseLookup] No case number in PropertyDetail for ${params.apn} (${foreclosureInfo.length} entries)`)
+      console.log(`[CaseLookup] Found ${case_number} for ${params.apn}`)
+      return { outcome: 'found', case_number, foreclosure_history: foreclosureInfo, request_id }
     }
 
-    return { case_number, foreclosure_history: foreclosureInfo }
+    console.log(`[CaseLookup] No case number for ${params.apn} (${foreclosureInfo.length} entries)`)
+    return { outcome: 'not_found', foreclosure_history: foreclosureInfo, request_id }
 
   } catch (err) {
-    console.error(`[CaseLookup] Error for ${params.apn}:`, err)
-    return { case_number: null, foreclosure_history: [] }
+    providerGateway.finalize({
+      request_id,
+      actual_cost_cents: 0,
+      success:           false,
+      error_code:        'provider_error',
+      duration_ms:       Date.now() - start,
+    }).catch(() => {})
+
+    console.error(`[CaseLookup] Provider error for ${params.apn}:`, err)
+    return {
+      outcome: 'provider_failed',
+      error:   err instanceof Error ? err.message : String(err),
+    }
   }
 }

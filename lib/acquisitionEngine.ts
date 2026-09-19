@@ -246,7 +246,7 @@ export interface ProgressStep {
 
 // ─── Next Actions ──────────────────────────────────────────────────────────────
 
-export type TabId = 'overview' | 'people' | 'contact' | 'analyze' | 'offer' | 'documents' | 'comms' | 'close' | 'listing'
+export type TabId = 'overview' | 'people' | 'contact' | 'analyze' | 'offer' | 'documents' | 'comms' | 'close' | 'listing' | 'comps'
 
 export type ActionType =
   | 'navigate'

@@ -1,16 +1,25 @@
 /**
- * RealEstateAPI.com (REAPI) Client
- * Covers Broward + Palm Beach county PA data.
- * Miami-Dade is handled separately via the free MD REST API.
+ * RealEstateAPI.com (REAPI) Client — gateway-enforced.
  *
- * Uses /v2/PropertySearch which does fuzzy address matching and returns
- * richer data than /v2/PropertyDetail (which requires exact address format).
+ * Every call to REAPI goes through providerGateway.authorize() before the
+ * HTTP request is made. If authorization fails (budget exceeded, feature
+ * disabled, service unavailable), the call is blocked and no HTTP request
+ * is made. Billing is finalized after the provider responds.
  *
- * Docs: https://developer.realestateapi.com/
- * Key:  REAPI_KEY env var (server-side only)
+ * Fail closed: any gate failure → blocked outcome. Provider errors →
+ * provider_failed outcome. Reservations are always released on failure.
+ *
+ * Background calls (BACKGROUND_CONTEXT) reserve the real vendor cost estimate
+ * from the pricing catalog. Gate 2 is bypassed in fn_reserve_budget_and_credits
+ * for the background system account; gate 3 (background_operations pool = 500¢/month)
+ * is the sole throttle. credit_cost is always 0 for background ops.
  */
 
+import { randomUUID } from 'crypto'
 import type { PropertySearchResult, County } from './types'
+import type { BillingContext, EnrichmentOutcome } from '@/lib/billing/gatewayContext'
+import { providerGateway } from '@/lib/billing/providerGateway'
+import { pricingEngine } from '@/lib/billing/pricingEngine'
 
 const REAPI_BASE = 'https://api.realestateapi.com/v2'
 
@@ -111,6 +120,8 @@ export interface REAPIProperty {
   mlsActive?:       boolean
   mlsPending?:      boolean
   mlsSold?:         boolean
+  mlsStatus?:       string
+  mlsListingPrice?: number
 
   // Mortgage
   lenderName?:           string
@@ -283,32 +294,113 @@ export function detectCountyFromZip(zip: string): County {
   return 'unknown'
 }
 
-// ─── Core API fetch ───────────────────────────────────────────────────────────
-
-function getKey(): string {
-  const key = process.env.REAPI_KEY
-  if (!key) throw new Error('REAPI_KEY environment variable is not set')
-  return key
-}
+// ─── Gateway-enforced core fetch ──────────────────────────────────────────────
+//
+// Every REAPI HTTP call goes through this function. It:
+//   1. Checks REAPI_KEY is configured (fail closed if missing)
+//   2. Looks up feature pricing to enforce gate 6 (enabled, confirmed cost)
+//   3. Calls providerGateway.authorize() for gates 1-5 + atomic reservation
+//   4. Makes the HTTP fetch
+//   5. Calls providerGateway.finalize() to reconcile actual cost
+//
+// Background context: real estimated_cost_cents from catalog (gate 2 is bypassed
+// in the RPC for the background system account; gate 3 pool is the throttle).
+// credit_cost is 0 for background — credits are never charged for system ops.
 
 async function reapiFetch(
   path: string,
-  body: Record<string, unknown>
-): Promise<REAPISearchResponse> {
-  const res = await fetch(`${REAPI_BASE}${path}`, {
-    method:  'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key':    getKey(),
-    },
-    body:   JSON.stringify(body),
-    signal: AbortSignal.timeout(15_000),
-  })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`REAPI ${path} HTTP ${res.status}: ${text.slice(0, 200)}`)
+  body: Record<string, unknown>,
+  billing: BillingContext,
+  featureKey: string
+): Promise<EnrichmentOutcome<REAPISearchResponse>> {
+  const key = process.env.REAPI_KEY
+  if (!key) {
+    return { outcome: 'blocked', error_code: 'provider_not_configured', safe_message: 'Provider is not configured.' }
   }
-  return res.json()
+
+  const pricing = await pricingEngine.getActivePricing(featureKey)
+
+  if (!pricing) {
+    return { outcome: 'blocked', error_code: 'feature_not_configured', safe_message: 'Feature has no active pricing configuration.' }
+  }
+
+  if (!pricing.is_enabled) {
+    return { outcome: 'blocked', error_code: 'feature_disabled', safe_message: pricing.disable_reason ?? 'Feature is currently disabled.' }
+  }
+
+  if (pricing.requires_confirmed_cost && pricing.expected_vendor_cost_cents === 0) {
+    return { outcome: 'blocked', error_code: 'unknown_vendor_cost', safe_message: 'Feature has unconfirmed vendor cost.' }
+  }
+
+  const request_id = randomUUID()
+
+  // All contexts — including background — must reserve the real vendor cost estimate.
+  // is_background only suppresses credit_cost (customers are never charged for cron ops).
+  const estimated_cost_cents = pricing.expected_vendor_cost_cents
+  const credit_cost          = billing.is_background ? 0 : pricing.customer_credit_cost
+
+  const auth = await providerGateway.authorize({
+    request_id,
+    account_id:            billing.account_id,
+    feature_key:           featureKey,
+    provider_key:          'reapi',
+    pool_key:              billing.pool_key,
+    estimated_cost_cents,
+    credit_cost,
+    is_zero_cost_feature:  false,
+  })
+
+  if (!auth.success) {
+    return {
+      outcome:      'blocked',
+      error_code:   auth.error_code    ?? 'authorization_failed',
+      safe_message: auth.error_message ?? 'This feature is currently unavailable.',
+    }
+  }
+
+  const start = Date.now()
+
+  try {
+    const res = await fetch(`${REAPI_BASE}${path}`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+      body:    JSON.stringify(body),
+      signal:  AbortSignal.timeout(15_000),
+    })
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      providerGateway.finalize({
+        request_id,
+        actual_cost_cents: 0,
+        success:           false,
+        error_code:        `http_${res.status}`,
+        duration_ms:       Date.now() - start,
+      }).catch(e => console.error('[REAPI] finalize error:', e))
+      return { outcome: 'provider_failed', error: `REAPI ${path} HTTP ${res.status}: ${text.slice(0, 200)}` }
+    }
+
+    const data: REAPISearchResponse = await res.json()
+
+    providerGateway.finalize({
+      request_id,
+      actual_cost_cents: pricing.expected_vendor_cost_cents,
+      success:           true,
+      duration_ms:       Date.now() - start,
+    }).catch(e => console.error('[REAPI] finalize error:', e))
+
+    return { outcome: 'success', data, request_id }
+
+  } catch (err) {
+    providerGateway.finalize({
+      request_id,
+      actual_cost_cents: 0,
+      success:           false,
+      error_code:        'provider_timeout_or_error',
+      duration_ms:       Date.now() - start,
+    }).catch(e => console.error('[REAPI] finalize error:', e))
+    return { outcome: 'provider_failed', error: String(err) }
+  }
 }
 
 // ─── Property search by address ───────────────────────────────────────────────
@@ -316,22 +408,21 @@ async function reapiFetch(
 export async function searchPropertiesByAddress(
   address: string,
   county: County,
-  limit = 10
-): Promise<PropertySearchResult[]> {
-  try {
-    const data = await reapiFetch('/PropertySearch', {
-      address,
-      size: limit,
-    })
+  limit: number,
+  billing: BillingContext
+): Promise<EnrichmentOutcome<PropertySearchResult[]>> {
+  const result = await reapiFetch('/PropertySearch', { address, size: limit }, billing, 'property_lookup_basic')
 
-    const items: REAPIProperty[] = Array.isArray(data.data)
-      ? data.data
-      : data.data ? [data.data] : (data.results ?? [])
+  if (result.outcome !== 'success') return result
 
-    return items.map(item => normalizeREAPIProperty(item, county))
-  } catch (err) {
-    console.error('[REAPI] searchPropertiesByAddress failed:', err)
-    return []
+  const items: REAPIProperty[] = Array.isArray(result.data.data)
+    ? result.data.data
+    : result.data.data ? [result.data.data] : (result.data.results ?? [])
+
+  return {
+    outcome:    'success',
+    data:       items.map(item => normalizeREAPIProperty(item, county)),
+    request_id: result.request_id,
   }
 }
 
@@ -339,32 +430,62 @@ export async function searchPropertiesByAddress(
 
 export async function getPropertyDetailByAddress(
   address: string,
-  county: County
-): Promise<PropertySearchResult | null> {
-  const results = await searchPropertiesByAddress(address, county, 1)
-  return results[0] ?? null
+  county: County,
+  billing: BillingContext
+): Promise<EnrichmentOutcome<PropertySearchResult | null>> {
+  const result = await searchPropertiesByAddress(address, county, 1, billing)
+  if (result.outcome !== 'success') return result
+  return { outcome: 'success', data: result.data[0] ?? null, request_id: result.request_id }
 }
 
 // ─── Lookup by APN/folio ─────────────────────────────────────────────────────
 
 export async function getPropertyByAPN(
   apn: string,
-  county: County
-): Promise<PropertySearchResult | null> {
-  try {
-    const data = await reapiFetch('/PropertySearch', {
-      apn,
-      size: 1,
-    })
+  county: County,
+  billing: BillingContext
+): Promise<EnrichmentOutcome<PropertySearchResult | null>> {
+  const result = await reapiFetch('/PropertySearch', { apn, size: 1 }, billing, 'property_report_full')
 
-    const items: REAPIProperty[] = Array.isArray(data.data)
-      ? data.data
-      : data.data ? [data.data] : (data.results ?? [])
+  if (result.outcome !== 'success') return result
 
-    const raw = items[0]
-    return raw ? normalizeREAPIProperty(raw, county) : null
-  } catch (err) {
-    console.error('[REAPI] getPropertyByAPN failed:', err)
-    return null
+  const items: REAPIProperty[] = Array.isArray(result.data.data)
+    ? result.data.data
+    : result.data.data ? [result.data.data] : (result.data.results ?? [])
+
+  const raw = items[0]
+  return {
+    outcome:    'success',
+    data:       raw ? normalizeREAPIProperty(raw, county) : null,
+    request_id: result.request_id,
+  }
+}
+
+// ─── Lookup by coordinates (lat/lng) ─────────────────────────────────────────
+
+export async function getPropertyByCoords(
+  lat: number,
+  lng: number,
+  county: County,
+  billing: BillingContext
+): Promise<EnrichmentOutcome<PropertySearchResult | null>> {
+  const result = await reapiFetch(
+    '/PropertySearch',
+    { latitude: lat, longitude: lng, radius: 0.05, size: 1 },
+    billing,
+    'property_lookup_basic'
+  )
+
+  if (result.outcome !== 'success') return result
+
+  const items: REAPIProperty[] = Array.isArray(result.data.data)
+    ? result.data.data
+    : result.data.data ? [result.data.data] : (result.data.results ?? [])
+
+  const raw = items[0]
+  return {
+    outcome:    'success',
+    data:       raw ? normalizeREAPIProperty(raw, county) : null,
+    request_id: result.request_id,
   }
 }

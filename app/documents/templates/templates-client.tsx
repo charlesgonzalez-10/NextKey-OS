@@ -4,11 +4,6 @@ import { useState, useEffect, useRef } from 'react'
 
 // ── Contract templates (contract_templates — PDF uploads) ─────────────────────
 
-interface TemplateField {
-  id: string; page: number; x: number; y: number; w: number; h: number
-  variable: string; label: string; defaultValue: string; fontSize: number
-}
-
 interface ContractTemplate {
   id: string
   name: string
@@ -16,8 +11,9 @@ interface ContractTemplate {
   category: string
   file_path: string
   page_count: number | null
+  current_version_id: string | null
+  draft_field_count: number
   created_at: string
-  field_mappings: TemplateField[] | null
 }
 
 // ── Generation modal types ────────────────────────────────────────────────────
@@ -246,7 +242,7 @@ export default function TemplatesClient() {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {contracts.map(c => {
-              const hasMappings = c.field_mappings && c.field_mappings.length > 0
+              const hasMappings = c.draft_field_count > 0 || !!c.current_version_id
               return (
                 <div
                   key={c.id}
@@ -279,7 +275,7 @@ export default function TemplatesClient() {
                           fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 5,
                           backgroundColor: 'rgba(74,207,154,0.12)', color: '#4ACF9A',
                         }}>
-                          {c.field_mappings!.length} fields mapped
+                          {c.current_version_id ? 'Published' : `${c.draft_field_count} fields`}
                         </span>
                       )}
                     </div>
@@ -375,7 +371,7 @@ export default function TemplatesClient() {
             </div>
 
             <p style={{ fontSize: 12, color: 'var(--c-text-2)', marginBottom: 20 }}>
-              Select the entities to fill <strong>{genTemplate.field_mappings?.length} fields</strong>. All are optional — unmatched fields will be left blank.
+              Select the entities to fill in mapped fields. All are optional — unmatched fields will be left blank.
             </p>
 
             {/* Contact search */}

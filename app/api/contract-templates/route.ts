@@ -11,12 +11,27 @@ export async function GET() {
 
   const { data, error } = await serviceClient
     .from('contract_templates')
-    .select('id, name, description, category, file_path, page_count, created_at, field_mappings')
+    .select('id, name, description, category, file_path, page_count, current_version_id, created_at')
     .eq('user_id', user.id)
     .order('created_at', { ascending: false })
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json(data)
+  if (!data?.length) return NextResponse.json([])
+
+  // Fetch draft field counts in one batch query
+  const ids = data.map(t => t.id)
+  const { data: fieldRows } = await serviceClient
+    .from('template_fields')
+    .select('blueprint_id')
+    .in('blueprint_id', ids)
+    .is('blueprint_version_id', null)
+
+  const draftCountById: Record<string, number> = {}
+  for (const row of fieldRows ?? []) {
+    draftCountById[row.blueprint_id] = (draftCountById[row.blueprint_id] ?? 0) + 1
+  }
+
+  return NextResponse.json(data.map(t => ({ ...t, draft_field_count: draftCountById[t.id] ?? 0 })))
 }
 
 // Called after client uploads directly to Supabase storage

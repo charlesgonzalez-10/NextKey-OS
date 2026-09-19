@@ -11,7 +11,9 @@
  *   { rent, rentRangeLow, rentRangeHigh, latitude, longitude }
  */
 
+import { randomUUID } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
+import { serviceClient } from '@/lib/supabase-service'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -30,6 +32,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'address param required', code: 'NO_ADDRESS' }, { status: 400 })
   }
 
+  const t0 = Date.now()
   try {
     const url  = `${BASE}/avm/rent/long-term?address=${encodeURIComponent(address)}`
     const res  = await fetch(url, {
@@ -38,6 +41,14 @@ export async function GET(req: NextRequest) {
     })
 
     if (!res.ok) {
+      // Platform-absorbed usage record on provider error
+      serviceClient.from('api_usage_events').insert({
+        request_id: randomUUID(), pool_key: 'background_operations',
+        provider_key: 'rentcast', feature_key: 'rental_analysis',
+        estimated_cost_cents: 5, actual_cost_cents: 0,
+        success: false, cache_hit: false, provider_called: true,
+        duration_ms: Date.now() - t0,
+      }).then(() => {}, () => {})
       const body = await res.json().catch(() => ({}))
       return NextResponse.json(
         { error: body?.message ?? `Rentcast error ${res.status}`, code: 'RENTCAST_ERROR' },
@@ -46,6 +57,16 @@ export async function GET(req: NextRequest) {
     }
 
     const data = await res.json()
+
+    // Platform-absorbed usage record: Rentcast billing model unconfirmed; treated as
+    // NextKey cost. Recorded so vendor spend is not financially invisible.
+    serviceClient.from('api_usage_events').insert({
+      request_id: randomUUID(), pool_key: 'background_operations',
+      provider_key: 'rentcast', feature_key: 'rental_analysis',
+      estimated_cost_cents: 5, actual_cost_cents: 5,
+      success: true, cache_hit: false, provider_called: true,
+      duration_ms: Date.now() - t0,
+    }).then(() => {}, () => {})
 
     return NextResponse.json({
       rent:          data.rent          ?? null,
@@ -56,6 +77,13 @@ export async function GET(req: NextRequest) {
       address:       data.addressLine1  ?? address,
     })
   } catch (err) {
+    serviceClient.from('api_usage_events').insert({
+      request_id: randomUUID(), pool_key: 'background_operations',
+      provider_key: 'rentcast', feature_key: 'rental_analysis',
+      estimated_cost_cents: 5, actual_cost_cents: 0,
+      success: false, cache_hit: false, provider_called: true,
+      duration_ms: Date.now() - t0,
+    }).then(() => {}, () => {})
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'Network error', code: 'FETCH_ERROR' },
       { status: 500 }

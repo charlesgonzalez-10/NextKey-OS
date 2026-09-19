@@ -28,6 +28,7 @@ const WorkspaceDocsTab         = dynamic(() => import('@/components/workspace/ta
 const CommunicationsTab        = dynamic(() => import('@/components/workspace/tabs/CommunicationsTab'))
 const CloseTab                 = dynamic(() => import('@/components/workspace/tabs/CloseTab'))
 const ListingTab               = dynamic(() => import('@/components/workspace/tabs/ListingTab'))
+const CompsTab                 = dynamic(() => import('@/components/workspace/tabs/CompsTab'))
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -84,6 +85,7 @@ const BASE_TABS: { id: TabId; label: string }[] = [
   { id: 'documents',   label: 'Documents' },
   { id: 'comms',       label: 'Communications' },
   { id: 'close',       label: 'Close' },
+  { id: 'comps',       label: 'Comps' },
 ]
 
 const COUNTY_LABELS: Record<string, string> = {
@@ -124,7 +126,7 @@ export default function WorkspaceClient(props: WorkspaceClientProps) {
   const router       = useRouter()
   const pathname     = usePathname()
   const searchParams = useSearchParams()
-  const propertyId   = pathname.split('/leads/')[1]
+  const propertyId   = pathname.split('/').filter(Boolean).pop() ?? ''
 
   // ── Mutable workspace data ──
   const [notes,     setNotes]     = useState<WorkspaceNote[]>(props.notes)
@@ -526,6 +528,7 @@ export default function WorkspaceClient(props: WorkspaceClientProps) {
             {activeTab === 'comms'      && <CommunicationsTab />}
             {activeTab === 'close'      && <CloseTab />}
             {activeTab === 'listing'    && <ListingTab />}
+            {activeTab === 'comps'      && <CompsTab />}
           </div>
 
           {/* Persistent sidebar */}

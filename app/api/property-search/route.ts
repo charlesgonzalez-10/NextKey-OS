@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { searchProperty, detectCounty } from '@/lib/enrichment/property-search'
 import type { County } from '@/lib/enrichment/types'
+import { buildCustomerContext } from '@/lib/billing/gatewayContext'
 import {
   ensurePropertyRecord,
   recordPropertySearch,
@@ -41,14 +42,18 @@ export async function GET(req: NextRequest) {
     county && county !== 'unknown' ? county : undefined
 
   try {
-    const result = await searchProperty(query, resolvedCounty)
+    const billing = buildCustomerContext(user.id)
+    const result = await searchProperty(query, resolvedCounty, billing)
 
     if (!result) {
       return NextResponse.json({
-        error:   'Property not found',
-        query,
-        county:  resolvedCounty ?? detectCounty(query),
-        tip:     'Try including the city or zip code in the address',
+        success:         false,
+        results:         [],
+        count:           0,
+        cached:          false,
+        searchSessionId: null,
+        pagination:      null,
+        error:           { code: 'not_found', message: 'Property not found. Try including the city or zip code.' },
       }, { status: 404 })
     }
 
@@ -68,20 +73,32 @@ export async function GET(req: NextRequest) {
       }
     }).catch(() => {})
 
-    return NextResponse.json({ result, query })
+    return NextResponse.json({
+      success:         true,
+      results:         [result],
+      count:           1,
+      cached:          false,
+      searchSessionId: null,
+      pagination:      null,
+      error:           null,
+    })
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
     console.error('[PropertySearch API]', msg)
 
-    // Give a helpful error if REAPI key is missing
-    if (msg.includes('REAPI_KEY')) {
-      return NextResponse.json({
-        error: 'Broward and Palm Beach lookup requires a RealEstateAPI.com API key. Add REAPI_KEY to your environment variables.',
-        setup_required: true,
-      }, { status: 503 })
-    }
+    const errorMsg = msg.includes('REAPI_KEY')
+      ? 'Broward and Palm Beach lookup requires a RealEstateAPI.com API key.'
+      : msg
 
-    return NextResponse.json({ error: msg }, { status: 500 })
+    return NextResponse.json({
+      success:         false,
+      results:         [],
+      count:           0,
+      cached:          false,
+      searchSessionId: null,
+      pagination:      null,
+      error:           { code: 'search_error', message: errorMsg },
+    }, { status: msg.includes('REAPI_KEY') ? 503 : 500 })
   }
 }

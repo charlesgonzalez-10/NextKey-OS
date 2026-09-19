@@ -48,8 +48,6 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   if (typeof body.name === 'string') updates.name = body.name.trim()
   if (typeof body.category === 'string') updates.category = body.category
   if (typeof body.description === 'string') updates.description = body.description
-  if (body.field_mappings !== undefined) updates.field_mappings = body.field_mappings
-
   const { data, error } = await serviceClient
     .from('contract_templates')
     .update(updates)

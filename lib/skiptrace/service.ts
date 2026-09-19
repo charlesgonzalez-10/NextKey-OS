@@ -1,24 +1,29 @@
 /**
  * Skip Trace Service
  *
- * Orchestrates provider calls with freshness gating, persistent storage,
- * credit tracking, and activity logging. Mirrors the Property Intelligence
- * pattern: check freshness → call provider if stale → store results →
- * mark refreshed → log activity.
+ * Orchestrates provider calls with billing gate enforcement, freshness gating,
+ * persistent storage, and activity logging.
+ *
+ * Every skip-trace call routes through ProviderGateway — the six-gate billing
+ * chokepoint. If billing is not supplied the call is rejected (fail closed).
+ *
+ * Flow: billing gate → freshness check → provider call → store results → finalize billing
  */
 
 import { serviceClient } from '../supabase-service'
 import { shouldRefreshModule, markModuleRefreshed } from '../propertyService'
 import { REAPISkipTraceProvider } from './providers/reapi'
+import { providerGateway } from '../billing/providerGateway'
+import type { BillingContext } from '../billing/gatewayContext'
 import type { SkipTraceInput, SkipTraceStoredResult } from './types'
 
 const PROVIDER = new REAPISkipTraceProvider()
 const ST_TTL_DAYS = 90
+const SKIP_TRACE_FEATURE_KEY = 'contact_enrichment'
 
 // ── Fetch stored results ───────────────────────────────────────────────────────
 
 export async function getLatestSkipTrace(propertyId: string): Promise<SkipTraceStoredResult | null> {
-  // Most recent completed request for this property
   const { data: req } = await serviceClient
     .from('skiptrace_requests')
     .select('id, provider, status, credits_used, cost_cents, response_time_ms, requested_at, completed_at')
@@ -78,7 +83,12 @@ export async function runSkipTrace(opts: {
   userId:     string
   userEmail:  string
   force?:     boolean
+  billing?:   BillingContext
 }): Promise<{ stored: SkipTraceStoredResult; fromCache: boolean }> {
+
+  if (!opts.billing) {
+    throw new Error('Skip trace requires a billing context — contact_enrichment feature must be authorized')
+  }
 
   // Freshness gate — skip provider call if data is still fresh
   if (!opts.force) {
@@ -89,7 +99,7 @@ export async function runSkipTrace(opts: {
     }
   }
 
-  // Create a pending request record
+  // Create a pending request record — its UUID is the billing request_id
   const { data: reqRow } = await serviceClient
     .from('skiptrace_requests')
     .insert({
@@ -115,22 +125,55 @@ export async function runSkipTrace(opts: {
   const reqId = reqRow.id
   const now   = new Date().toISOString()
 
+  // ── Gateway authorization (six-gate billing check) ─────────────────────────
+  const auth = await providerGateway.authorizeFeature({
+    request_id:  reqId,
+    account_id:  opts.billing.account_id,
+    feature_key: SKIP_TRACE_FEATURE_KEY,
+    pool_key:    opts.billing.pool_key,
+  })
+
+  if (!auth.success) {
+    await serviceClient
+      .from('skiptrace_requests')
+      .update({ status: 'failed', completed_at: now })
+      .eq('id', reqId)
+
+    void serviceClient.from('lead_notes').insert({
+      lead_id:   opts.leadId ?? opts.propertyId,
+      note_type: 'skip_trace',
+      author:    opts.userEmail,
+      body:      `Skip Trace blocked: ${auth.error_message ?? auth.error_code ?? 'feature disabled or insufficient credits'}`,
+    })
+
+    throw new Error(auth.error_message ?? 'Skip trace blocked: feature disabled or insufficient credits')
+  }
+
+  const start = Date.now()
+
   try {
     const result = await PROVIDER.run(opts.input)
+
+    // Finalize billing (fire-and-forget; never blocks response)
+    providerGateway.finalize({
+      request_id:        reqId,
+      actual_cost_cents: result.cost_cents ?? 0,
+      success:           true,
+      duration_ms:       result.response_time_ms,
+    }).catch(e => console.error('[SkipTrace] finalize error:', e))
 
     // Persist provider result
     await serviceClient
       .from('skiptrace_requests')
       .update({
-        status:          'completed',
-        credits_used:    result.credits_used,
-        cost_cents:      result.cost_cents,
+        status:           'completed',
+        credits_used:     result.credits_used,
+        cost_cents:       result.cost_cents,
         response_time_ms: result.response_time_ms,
-        completed_at:    now,
+        completed_at:     now,
       })
       .eq('id', reqId)
 
-    // Collect first phones across all contacts for backward-compat columns
     const allPhones: string[] = []
 
     for (const contact of result.contacts) {
@@ -177,7 +220,7 @@ export async function runSkipTrace(opts: {
       }
     }
 
-    // Back-fill phone_1–5 on properties so the existing workspace display picks them up
+    // Back-fill phone_1–5 on properties
     const phoneUpdate: Record<string, string | null> = {
       phone_1: allPhones[0] ?? null,
       phone_2: allPhones[1] ?? null,
@@ -187,10 +230,8 @@ export async function runSkipTrace(opts: {
     }
     await serviceClient.from('properties').update({ ...phoneUpdate, updated_at: now }).eq('id', opts.propertyId)
 
-    // Mark module refreshed so freshness gate works on next open
     await markModuleRefreshed(opts.propertyId, 'skiptrace', PROVIDER.name)
 
-    // Activity log
     const totalContacts = result.contacts.length
     const totalPhones   = allPhones.length
     const totalEmails   = result.contacts.reduce((n, c) => n + c.emails.length, 0)
@@ -205,13 +246,20 @@ export async function runSkipTrace(opts: {
     return { stored: stored!, fromCache: false }
 
   } catch (err) {
-    // Mark the request as failed but don't swallow the error
+    // Finalize billing as failed — releases reserved budget/credits
+    providerGateway.finalize({
+      request_id:        reqId,
+      actual_cost_cents: 0,
+      success:           false,
+      error_code:        'provider_error',
+      duration_ms:       Date.now() - start,
+    }).catch(() => {})
+
     await serviceClient
       .from('skiptrace_requests')
       .update({ status: 'failed', completed_at: now })
       .eq('id', reqId)
 
-    // Activity log the failure
     void serviceClient.from('lead_notes').insert({
       lead_id:   opts.leadId ?? opts.propertyId,
       note_type: 'skip_trace',
@@ -230,6 +278,7 @@ export async function bulkSkipTrace(opts: {
   userId:      string
   userEmail:   string
   force?:      boolean
+  billing?:    BillingContext
 }): Promise<{ processed: number; skipped: number; errors: number; credits_used: number }> {
   let processed = 0, skipped = 0, errors = 0, credits_used = 0
 
@@ -266,6 +315,7 @@ export async function bulkSkipTrace(opts: {
         userId:    opts.userId,
         userEmail: opts.userEmail,
         force:     opts.force,
+        billing:   opts.billing,
       })
 
       if (fromCache) {
@@ -281,3 +331,4 @@ export async function bulkSkipTrace(opts: {
 
   return { processed, skipped, errors, credits_used }
 }
+

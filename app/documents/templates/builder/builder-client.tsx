@@ -16,6 +16,15 @@ interface TemplateField {
   label: string
   defaultValue: string
   fontSize: number
+  fieldType: string       // 'merge_text' | 'signature' | 'initial' | 'date' | 'checkbox'
+  signerRoleId: string | null
+}
+
+interface SignerRole {
+  id: string
+  name: string
+  color: string
+  auto_suggest: string | null
 }
 
 interface ContractTemplate {
@@ -23,8 +32,21 @@ interface ContractTemplate {
   name: string
   category: string
   page_count: number | null
+  current_version_id: string | null
+  draft_field_count: number
   created_at: string
-  field_mappings: TemplateField[] | null
+}
+
+interface DetectedSuggestion {
+  label: string
+  fieldType: 'signature' | 'initial'
+  signerRoleId: string | null
+  roleName: string
+  page: number
+  x: number
+  y: number
+  w: number
+  h: number
 }
 
 // ── Variable Groups ───────────────────────────────────────────────────────────
@@ -101,6 +123,48 @@ function variableLabel(variable: string): string {
   return variable
 }
 
+function fieldColor(field: TemplateField, signerRoles: SignerRole[]): string {
+  if (field.fieldType === 'signature' || field.fieldType === 'initial') {
+    const role = signerRoles.find(r => r.id === field.signerRoleId)
+    return role?.color ?? '#7B8FD4'
+  }
+  return variableColor(field.variable)
+}
+
+function fieldDisplayLabel(field: TemplateField, signerRoles: SignerRole[]): string {
+  if (field.fieldType === 'signature' || field.fieldType === 'initial') {
+    const role = signerRoles.find(r => r.id === field.signerRoleId)
+    const roleName = role?.name ?? 'Signer'
+    return field.fieldType === 'signature' ? `${roleName} — Sig` : `${roleName} — INI`
+  }
+  return field.label || variableLabel(field.variable)
+}
+
+// ── Signing label detection patterns ─────────────────────────────────────────
+// Used by detectSigningFields() to propose signature/initial placements from PDF text.
+
+const SIGNING_DETECT_PATTERNS: Array<{
+  re: RegExp
+  fieldType: 'signature' | 'initial'
+  roleKey: string   // matches signer_roles.name (case-insensitive); '' = unknown role
+  displayLabel: string
+}> = [
+  { re: /buyer['']?s?\s+signature/i,     fieldType: 'signature', roleKey: 'Buyer',   displayLabel: 'Buyer Signature' },
+  { re: /purchaser['']?s?\s+signature/i, fieldType: 'signature', roleKey: 'Buyer',   displayLabel: 'Purchaser Signature' },
+  { re: /seller['']?s?\s+signature/i,    fieldType: 'signature', roleKey: 'Seller',  displayLabel: 'Seller Signature' },
+  { re: /owner['']?s?\s+signature/i,     fieldType: 'signature', roleKey: 'Seller',  displayLabel: 'Owner Signature' },
+  { re: /client['']?s?\s+signature/i,    fieldType: 'signature', roleKey: 'Client',  displayLabel: 'Client Signature' },
+  { re: /agent['']?s?\s+signature/i,     fieldType: 'signature', roleKey: 'Agent',   displayLabel: 'Agent Signature' },
+  { re: /witness['']?s?\s+signature/i,   fieldType: 'signature', roleKey: 'Witness', displayLabel: 'Witness Signature' },
+  { re: /buyer['']?s?\s+initial/i,       fieldType: 'initial',   roleKey: 'Buyer',   displayLabel: 'Buyer Initials' },
+  { re: /purchaser['']?s?\s+initial/i,   fieldType: 'initial',   roleKey: 'Buyer',   displayLabel: 'Purchaser Initials' },
+  { re: /seller['']?s?\s+initial/i,      fieldType: 'initial',   roleKey: 'Seller',  displayLabel: 'Seller Initials' },
+  { re: /owner['']?s?\s+initial/i,       fieldType: 'initial',   roleKey: 'Seller',  displayLabel: 'Owner Initials' },
+  { re: /client['']?s?\s+initial/i,      fieldType: 'initial',   roleKey: 'Client',  displayLabel: 'Client Initials' },
+  { re: /^initial[s]?:?\s*$/i,           fieldType: 'initial',   roleKey: '',        displayLabel: 'Initials' },
+  { re: /^sign\s*here:?\s*$/i,           fieldType: 'signature', roleKey: '',        displayLabel: 'Sign Here' },
+]
+
 // ── Map AcroForm field names → variables (for fillable PDFs) ─────────────────
 
 function matchAnnotationName(raw: string): { variable: string; label: string } | null {
@@ -145,12 +209,10 @@ function matchAnnotationName(raw: string): { variable: string; label: string } |
 // ── Auto-detect patterns ──────────────────────────────────────────────────────
 
 const AUTO_DETECT_PATTERNS = [
-  // Parties
   { re: /\bbuyer\s*(#?\s*1\s*)?(name)?:?\s*$/i,                  variable: '{{Contact.FullName}}',        label: 'Buyer Name' },
   { re: /\bbuyer\s*#?\s*2\s*(name)?:?\s*$/i,                     variable: '{{Buyer.Name2}}',             label: 'Buyer 2 Name' },
   { re: /\bseller\s*(#?\s*1\s*)?(name)?:?\s*$/i,                 variable: '{{Seller.Name}}',             label: 'Seller Name' },
   { re: /\bseller\s*#?\s*2\s*(name)?:?\s*$/i,                    variable: '{{Seller.Name2}}',            label: 'Seller 2 Name' },
-  // Property
   { re: /\b(property\s*)?address:?\s*$/i,                        variable: '{{Property.Address}}',        label: 'Address' },
   { re: /\bcity:?\s*$/i,                                         variable: '{{Property.City}}',           label: 'City' },
   { re: /\bstate:?\s*$/i,                                        variable: '{{Property.State}}',          label: 'State' },
@@ -158,31 +220,24 @@ const AUTO_DETECT_PATTERNS = [
   { re: /\bcounty:?\s*$/i,                                       variable: '{{Property.County}}',         label: 'County' },
   { re: /\b(folio|parcel)\s*(no\.?|#|number)?:?\s*$/i,          variable: '{{Property.Folio}}',          label: 'Folio / Parcel #' },
   { re: /\blegal\s*(description)?:?\s*$/i,                       variable: '{{Property.LegalDesc}}',      label: 'Legal Description' },
-  // Deal — price & deposits
   { re: /\b(purchase\s*price|offer\s*price|total\s*price):?\s*$/i, variable: '{{Deal.OfferPrice}}',      label: 'Purchase Price' },
   { re: /\b(initial\s*)?(earnest\s*money|binder|escrow\s*deposit):?\s*$/i, variable: '{{Deal.EarnestMoney}}', label: 'Earnest Money' },
   { re: /\badditional\s*deposit:?\s*$/i,                         variable: '{{Deal.AdditionalDeposit}}',  label: 'Additional Deposit' },
   { re: /\bbalance\s*(to\s*(close|closing))?:?\s*$/i,            variable: '{{Deal.BalanceToClose}}',     label: 'Balance to Close' },
   { re: /\b(loan|mortgage|financing)\s*(amount)?:?\s*$/i,        variable: '{{Deal.LoanAmount}}',         label: 'Loan Amount' },
   { re: /\b(loan|financing)\s*type:?\s*$/i,                      variable: '{{Deal.LoanType}}',           label: 'Loan Type' },
-  // Deal — dates & timeline
   { re: /\b(closing\s*date|close\s*date):?\s*$/i,                variable: '{{Deal.ClosingDate}}',        label: 'Closing Date' },
   { re: /\b(inspection|due\s*diligence)\s*(period|days?)?:?\s*$/i, variable: '{{Deal.InspectionDays}}',  label: 'Inspection Days' },
   { re: /\b(offer\s*)?(expires?|expiration|void\s*after):?\s*$/i, variable: '{{Deal.ExpirationDate}}',   label: 'Expiration Date' },
   { re: /\beffective\s*date:?\s*$/i,                             variable: '{{Date.Effective}}',          label: 'Effective Date' },
-  // Deal — terms
   { re: /\bseller\s*(credit|contribution|concession|allowance):?\s*$/i, variable: '{{Deal.SellerContribution}}', label: 'Seller Contribution' },
   { re: /\brepair\s*(limit|allowance|cap)?:?\s*$/i,              variable: '{{Deal.RepairLimit}}',        label: 'Repair Limit' },
-  // Contacts
   { re: /\bemail:?\s*$/i,                                        variable: '{{Contact.Email}}',           label: 'Buyer Email' },
   { re: /\bphone:?\s*$/i,                                        variable: '{{Contact.Phone}}',           label: 'Buyer Phone' },
-  // Agent
   { re: /\b(agent|realtor|broker)\s*(name)?:?\s*$/i,             variable: '{{Agent.Name}}',              label: 'Agent Name' },
   { re: /\blicense\s*(no\.?|#|number)?:?\s*$/i,                  variable: '{{Agent.License}}',           label: 'License #' },
   { re: /\bbrokerage:?\s*$/i,                                    variable: '{{Agent.Company}}',           label: 'Brokerage' },
-  // Escrow
   { re: /\b(escrow|title|closing)\s*(agent|company|officer|attorney)?:?\s*$/i, variable: '{{Escrow.Agent}}', label: 'Escrow Agent' },
-  // Date
   { re: /\b(date|today):?\s*$/i,                                 variable: '{{Date.Today}}',              label: "Today's Date" },
 ]
 
@@ -195,9 +250,11 @@ interface PageProps {
   scale: number
   fields: TemplateField[]
   activeVariable: string | null
-  selectedFieldId: string | null
+  selectedFieldIds: Set<string>
+  hasActiveTool: boolean
+  signerRoles: SignerRole[]
   onPlace: (page: number, x: number, y: number) => void
-  onSelect: (id: string) => void
+  onSelect: (id: string, multi: boolean) => void
   onDelete: (id: string) => void
   onDrag: (e: React.MouseEvent, id: string, pw: number, ph: number) => void
   onResize: (e: React.MouseEvent, id: string, pw: number, ph: number) => void
@@ -206,7 +263,8 @@ interface PageProps {
 
 function PageCanvas({
   pdfDoc, pageNum, scale, fields, activeVariable,
-  selectedFieldId, onPlace, onSelect, onDelete, onDrag, onResize, onDimsReady,
+  selectedFieldIds, hasActiveTool, signerRoles,
+  onPlace, onSelect, onDelete, onDrag, onResize, onDimsReady,
 }: PageProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [dims, setDims] = useState({ w: 0, h: 0 })
@@ -229,7 +287,7 @@ function PageCanvas({
   }, [pdfDoc, pageNum, scale, onDimsReady])
 
   const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!activeVariable || !dims.w) return
+    if (!hasActiveTool || !dims.w) return
     const rect = e.currentTarget.getBoundingClientRect()
     onPlace(pageNum, (e.clientX - rect.left) / dims.w, (e.clientY - rect.top) / dims.h)
   }
@@ -241,51 +299,61 @@ function PageCanvas({
       <canvas ref={canvasRef} style={{ display: 'block' }} />
       <div
         onClick={handleClick}
-        style={{ position: 'absolute', inset: 0, cursor: activeVariable ? 'crosshair' : 'default' }}
+        style={{ position: 'absolute', inset: 0, cursor: hasActiveTool ? 'crosshair' : 'default' }}
       />
       {dims.w > 0 && pageFields.map(field => {
-        const color = variableColor(field.variable)
-        const isSelected = field.id === selectedFieldId
-        const textPx = (field.fontSize ?? 11) * scale   // actual render size of the filled text
+        const color = fieldColor(field, signerRoles)
+        const isSigning = field.fieldType === 'signature' || field.fieldType === 'initial'
+        const isSelected = selectedFieldIds.has(field.id)
+        const isOnlySelected = isSelected && selectedFieldIds.size === 1
+        const textPx = (field.fontSize ?? 11) * scale
         return (
           <div
             key={field.id}
             onMouseDown={e => { e.stopPropagation(); onDrag(e, field.id, dims.w, dims.h) }}
-            onClick={e => { e.stopPropagation(); onSelect(field.id) }}
+            onClick={e => { e.stopPropagation(); onSelect(field.id, e.shiftKey || e.metaKey || e.ctrlKey) }}
             style={{
               position: 'absolute',
               left: `${field.x * dims.w}px`,
               top: `${field.y * dims.h}px`,
               width: `${field.w * dims.w}px`,
               height: `${field.h * dims.h}px`,
-              backgroundColor: `${color}28`,
+              backgroundColor: isSigning ? `${color}20` : `${color}28`,
               border: `2px solid ${isSelected ? color : color + '90'}`,
-              borderRadius: 3,
+              borderRadius: isSigning ? 6 : 3,
               cursor: 'move',
               overflow: 'hidden',
               userSelect: 'none', zIndex: 10,
               boxShadow: isSelected ? `0 0 0 2px white, 0 0 0 3px ${color}` : undefined,
             }}
           >
-            {/* Variable name badge — always tiny */}
             <span style={{
               position: 'absolute', top: 1, left: 3,
               fontSize: 7, fontWeight: 700, color, whiteSpace: 'nowrap',
-              pointerEvents: 'none', lineHeight: 1, opacity: 0.7,
+              pointerEvents: 'none', lineHeight: 1, opacity: 0.85,
             }}>
-              {field.label || variableLabel(field.variable)}
+              {fieldDisplayLabel(field, signerRoles)}
             </span>
-            {/* Text size preview — matches what pdf-lib will print */}
-            <span style={{
-              position: 'absolute', bottom: 2, left: 4,
-              fontSize: textPx, lineHeight: 1, color,
-              whiteSpace: 'nowrap', pointerEvents: 'none', opacity: 0.5,
-              fontFamily: 'Helvetica, Arial, sans-serif',
-            }}>
-              Abc
-            </span>
-            {/* Delete button */}
-            {isSelected && (
+            {isSigning ? (
+              <span style={{
+                position: 'absolute', bottom: 2, left: '50%', transform: 'translateX(-50%)',
+                fontSize: Math.max(10, (field.h * dims.h) * 0.45), lineHeight: 1, color,
+                pointerEvents: 'none', opacity: 0.4,
+              }}>
+                {field.fieldType === 'signature' ? '✍' : 'INI'}
+              </span>
+            ) : (
+              <span style={{
+                position: 'absolute', bottom: 2, left: 4,
+                fontSize: textPx, lineHeight: 1, color,
+                whiteSpace: 'nowrap', pointerEvents: 'none', opacity: 0.5,
+                fontFamily: 'Helvetica, Arial, sans-serif',
+              }}>
+                Abc
+              </span>
+            )}
+            {/* Delete × button — only in single-select */}
+            {isOnlySelected && (
               <button
                 onMouseDown={e => e.stopPropagation()}
                 onClick={e => { e.stopPropagation(); onDelete(field.id) }}
@@ -298,7 +366,7 @@ function PageCanvas({
                 }}
               >×</button>
             )}
-            {/* Resize handle — bottom-right corner */}
+            {/* Resize handle */}
             <div
               onMouseDown={e => { e.stopPropagation(); onResize(e, field.id, dims.w, dims.h) }}
               style={{
@@ -315,12 +383,26 @@ function PageCanvas({
   )
 }
 
+// ── Alignment button config ───────────────────────────────────────────────────
+
+const ALIGN_BUTTONS: Array<{ key: string; label: string; title: string }> = [
+  { key: 'left',    label: '⊣L',  title: 'Align left edges' },
+  { key: 'center-h',label: '↔C', title: 'Center horizontally' },
+  { key: 'right',   label: 'R⊢',  title: 'Align right edges' },
+  { key: 'dist-h',  label: '⇔',   title: 'Distribute horizontal gaps evenly (3+ fields)' },
+  { key: 'top',     label: '⊤T',  title: 'Align top edges' },
+  { key: 'center-v',label: '↕C',  title: 'Center vertically' },
+  { key: 'bottom',  label: 'B⊥',  title: 'Align bottom edges' },
+  { key: 'dist-v',  label: '⇕',   title: 'Distribute vertical gaps evenly (3+ fields)' },
+]
+
 // ── Main Builder ──────────────────────────────────────────────────────────────
 
 export default function BuilderClient() {
   const searchParams = useSearchParams()
   const idParam = searchParams.get('id')
 
+  // ── Core state ────────────────────────────────────────────────────────────
   const [step, setStep] = useState<'source' | 'builder'>('source')
   const [templateId, setTemplateId] = useState<string | null>(null)
   const [templateName, setTemplateName] = useState('')
@@ -331,19 +413,151 @@ export default function BuilderClient() {
   const [numPages, setNumPages] = useState(0)
   const [pdfLoading, setPdfLoading] = useState(false)
   const [activeVariable, setActiveVariable] = useState<string | null>(null)
-  const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null)
+  const [selectedFieldIds, setSelectedFieldIds] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
+  const [publishing, setPublishing] = useState(false)
   const [savedBanner, setSavedBanner] = useState<string | null>(null)
   const [autoDetecting, setAutoDetecting] = useState(false)
-
-  // Source picker state
+  const [currentVersionLabel, setCurrentVersionLabel] = useState<string | null>(null)
+  const [signerRoles, setSignerRoles] = useState<SignerRole[]>([])
+  const [activeSigningFieldType, setActiveSigningFieldType] = useState<'signature' | 'initial' | null>(null)
+  const [activeSigningRoleId, setActiveSigningRoleId] = useState<string | null>(null)
   const [contracts, setContracts] = useState<ContractTemplate[]>([])
   const [contractsLoading, setContractsLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
-  const fileRef = useRef<HTMLInputElement>(null)
 
-  // Load pdf with pdfjs when pdfUrl is set
+  // ── Productivity state ────────────────────────────────────────────────────
+  const [clipboard, setClipboard] = useState<TemplateField[]>([])
+  const [canUndo, setCanUndo] = useState(false)
+  const [canRedo, setCanRedo] = useState(false)
+  const [detectedSuggestions, setDetectedSuggestions] = useState<DetectedSuggestion[]>([])
+  const [showDetectModal, setShowDetectModal] = useState(false)
+  const [detectingSignFields, setDetectingSignFields] = useState(false)
+
+  // ── Refs ──────────────────────────────────────────────────────────────────
+  const fileRef = useRef<HTMLInputElement>(null)
+  const undoStackRef = useRef<TemplateField[][]>([])
+  const redoStackRef = useRef<TemplateField[][]>([])
+  const fieldsRef = useRef<TemplateField[]>([])
+  const selectedFieldIdsRef = useRef<Set<string>>(new Set())
+
+  // Keep refs in sync with state
+  useEffect(() => { fieldsRef.current = fields }, [fields])
+  useEffect(() => { selectedFieldIdsRef.current = selectedFieldIds }, [selectedFieldIds])
+
+  // ── History helpers ───────────────────────────────────────────────────────
+
+  const setFieldsWithHistory = useCallback((newFields: TemplateField[]) => {
+    undoStackRef.current = [...undoStackRef.current.slice(-49), fieldsRef.current]
+    redoStackRef.current = []
+    setCanUndo(true)
+    setCanRedo(false)
+    setFields(newFields)
+  }, [])
+
+  const undo = useCallback(() => {
+    if (!undoStackRef.current.length) return
+    const prev = undoStackRef.current[undoStackRef.current.length - 1]
+    redoStackRef.current = [...redoStackRef.current, fieldsRef.current]
+    undoStackRef.current = undoStackRef.current.slice(0, -1)
+    setCanUndo(undoStackRef.current.length > 0)
+    setCanRedo(true)
+    setFields(prev)
+    setSelectedFieldIds(new Set())
+  }, [])
+
+  const redo = useCallback(() => {
+    if (!redoStackRef.current.length) return
+    const next = redoStackRef.current[redoStackRef.current.length - 1]
+    undoStackRef.current = [...undoStackRef.current, fieldsRef.current]
+    redoStackRef.current = redoStackRef.current.slice(0, -1)
+    setCanUndo(true)
+    setCanRedo(redoStackRef.current.length > 0)
+    setFields(next)
+    setSelectedFieldIds(new Set())
+  }, [])
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (step !== 'builder') return
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return
+
+      const meta = e.metaKey || e.ctrlKey
+      const cur = fieldsRef.current
+      const ids = selectedFieldIdsRef.current
+
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setSelectedFieldIds(new Set())
+        setActiveVariable(null)
+        setActiveSigningFieldType(null)
+        setActiveSigningRoleId(null)
+        return
+      }
+
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !meta && ids.size > 0) {
+        e.preventDefault()
+        setFieldsWithHistory(cur.filter(f => !ids.has(f.id)))
+        setSelectedFieldIds(new Set())
+        return
+      }
+
+      if (meta && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return }
+      if (meta && e.key === 'z' && e.shiftKey)  { e.preventDefault(); redo(); return }
+
+      if (meta && e.key === 'c' && !e.shiftKey && ids.size > 0) {
+        e.preventDefault()
+        setClipboard(cur.filter(f => ids.has(f.id)))
+        return
+      }
+
+      if (meta && e.key === 'v' && !e.shiftKey) {
+        e.preventDefault()
+        const cb = clipboard
+        if (cb.length > 0) {
+          const pasted = cb.map(f => ({ ...f, id: crypto.randomUUID(), x: Math.min(f.x + 0.02, 0.95), y: Math.min(f.y + 0.02, 0.95) }))
+          setFieldsWithHistory([...cur, ...pasted])
+          setSelectedFieldIds(new Set(pasted.map(f => f.id)))
+        }
+        return
+      }
+
+      if (meta && e.key === 'd' && !e.shiftKey && ids.size > 0) {
+        e.preventDefault()
+        const duped = cur.filter(f => ids.has(f.id)).map(f => ({ ...f, id: crypto.randomUUID(), x: Math.min(f.x + 0.02, 0.95), y: Math.min(f.y + 0.02, 0.95) }))
+        setFieldsWithHistory([...cur, ...duped])
+        setSelectedFieldIds(new Set(duped.map(f => f.id)))
+        return
+      }
+
+      // Arrow nudge — does not push to undo (too frequent; drag can always reverse)
+      if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key) && ids.size > 0) {
+        e.preventDefault()
+        const nudge = e.shiftKey ? 0.01 : 0.002
+        setFields(cur.map(f => {
+          if (!ids.has(f.id)) return f
+          return {
+            ...f,
+            x: e.key === 'ArrowLeft'  ? Math.max(0, f.x - nudge)
+              : e.key === 'ArrowRight' ? Math.min(1 - f.w, f.x + nudge)
+              : f.x,
+            y: e.key === 'ArrowUp'    ? Math.max(0, f.y - nudge)
+              : e.key === 'ArrowDown'  ? Math.min(1 - f.h, f.y + nudge)
+              : f.y,
+          }
+        }))
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [step, clipboard, undo, redo, setFieldsWithHistory])
+
+  // ── Load PDF with pdfjs when pdfUrl is set ────────────────────────────────
+
   useEffect(() => {
     if (!pdfUrl) return
     let cancelled = false
@@ -358,19 +572,41 @@ export default function BuilderClient() {
     return () => { cancelled = true }
   }, [pdfUrl])
 
-  // Load a contract template and switch to builder
+  // ── Load signer roles once on mount ──────────────────────────────────────
+
+  useEffect(() => {
+    fetch('/api/signer-roles')
+      .then(r => r.json())
+      .then(d => { if (Array.isArray(d.roles)) setSignerRoles(d.roles) })
+      .catch(() => {})
+  }, [])
+
+  // ── Template load ─────────────────────────────────────────────────────────
+
   const loadTemplate = useCallback(async (id: string) => {
     const res = await fetch(`/api/contract-templates/${id}`)
     if (!res.ok) return
     const data = await res.json()
     setTemplateId(id)
     setTemplateName(data.name ?? '')
-    if (Array.isArray(data.field_mappings)) setFields(data.field_mappings)
+
+    const fieldsRes = await fetch(`/api/contract-templates/${id}/fields`)
+    if (fieldsRes.ok) {
+      const fd = await fieldsRes.json()
+      if (Array.isArray(fd.fields) && fd.fields.length > 0) setFields(fd.fields)
+    }
+
+    const versRes = await fetch(`/api/contract-templates/${id}/versions`)
+    if (versRes.ok) {
+      const vd = await versRes.json()
+      const current = Array.isArray(vd.versions) ? vd.versions.find((v: { is_current: boolean; version_label: string }) => v.is_current) : null
+      if (current) setCurrentVersionLabel(current.version_label)
+    }
+
     if (data.url) setPdfUrl(data.url)
     setStep('builder')
   }, [])
 
-  // If URL has ?id=, jump straight to builder
   useEffect(() => {
     if (idParam) {
       loadTemplate(idParam)
@@ -383,7 +619,8 @@ export default function BuilderClient() {
     }
   }, [idParam, loadTemplate])
 
-  // Upload a new PDF → creates contract template → loads into builder
+  // ── Upload new PDF → create template → load into builder ─────────────────
+
   const handleUpload = async (file: File) => {
     if (file.type !== 'application/pdf') { setUploadError('Only PDF files accepted.'); return }
     setUploading(true); setUploadError(null)
@@ -396,53 +633,94 @@ export default function BuilderClient() {
     await loadTemplate(data.id)
   }
 
-  // Page dims callback (stored for potential future use by parent)
   const handleDimsReady = useCallback((_page: number, _w: number, _h: number) => {}, [])
 
-  // Place a field on click
+  // ── Place field on click ──────────────────────────────────────────────────
+
   const handlePlace = useCallback((page: number, xFrac: number, yFrac: number) => {
-    if (!activeVariable) return
-    const w = 0.22, h = 0.04
+    const isSigning = !!(activeSigningFieldType && activeSigningRoleId)
+    if (!activeVariable && !isSigning) return
+    const w = isSigning ? 0.28 : 0.22
+    const h = isSigning ? 0.06 : 0.04
+    const role = isSigning ? signerRoles.find(r => r.id === activeSigningRoleId) : null
     const newField: TemplateField = {
       id: crypto.randomUUID(),
       page,
       x: Math.max(0, Math.min(xFrac - w / 2, 1 - w)),
       y: Math.max(0, Math.min(yFrac - h / 2, 1 - h)),
       w, h,
-      variable: activeVariable,
-      label: variableLabel(activeVariable),
+      variable: activeVariable ?? '',
+      label: isSigning
+        ? `${role?.name ?? 'Signer'} ${activeSigningFieldType === 'signature' ? 'Signature' : 'Initials'}`
+        : variableLabel(activeVariable!),
       defaultValue: '',
       fontSize: 11,
+      fieldType: isSigning ? activeSigningFieldType! : 'merge_text',
+      signerRoleId: isSigning ? activeSigningRoleId : null,
     }
-    setFields(prev => [...prev, newField])
-    setSelectedFieldId(newField.id)
-  }, [activeVariable])
+    setFieldsWithHistory([...fieldsRef.current, newField])
+    setSelectedFieldIds(new Set([newField.id]))
+  }, [activeVariable, activeSigningFieldType, activeSigningRoleId, signerRoles, setFieldsWithHistory])
 
-  // Drag a field
+  // ── Drag — supports multi-select: dragging any selected field moves the group ─
+
   const handleDrag = useCallback((e: React.MouseEvent, fieldId: string, pw: number, ph: number) => {
     e.stopPropagation()
-    const field = fields.find(f => f.id === fieldId)
-    if (!field) return
-    const startX = e.clientX, startY = e.clientY
-    const origX = field.x, origY = field.y
-    const onMove = (ev: MouseEvent) => {
-      setFields(prev => prev.map(f => f.id === fieldId ? {
-        ...f,
-        x: Math.max(0, Math.min(origX + (ev.clientX - startX) / pw, 1 - f.w)),
-        y: Math.max(0, Math.min(origY + (ev.clientY - startY) / ph, 1 - f.h)),
-      } : f))
+
+    const cur = fieldsRef.current
+    const ids = selectedFieldIdsRef.current
+    const dragIds = ids.has(fieldId) ? [...ids] : [fieldId]
+    if (!ids.has(fieldId)) setSelectedFieldIds(new Set([fieldId]))
+
+    const origPositions: Record<string, { x: number; y: number }> = {}
+    for (const f of cur) {
+      if (dragIds.includes(f.id)) origPositions[f.id] = { x: f.x, y: f.y }
     }
-    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp) }
-    document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp)
-    setSelectedFieldId(fieldId)
-  }, [fields])
+
+    // Capture pre-drag state for undo
+    const preDrag = [...cur]
+    const startX = e.clientX, startY = e.clientY
+
+    const onMove = (ev: MouseEvent) => {
+      const dx = (ev.clientX - startX) / pw
+      const dy = (ev.clientY - startY) / ph
+      setFields(prev => prev.map(f => {
+        if (!dragIds.includes(f.id)) return f
+        const orig = origPositions[f.id]
+        if (!orig) return f
+        return {
+          ...f,
+          x: Math.max(0, Math.min(orig.x + dx, 1 - f.w)),
+          y: Math.max(0, Math.min(orig.y + dy, 1 - f.h)),
+        }
+      }))
+    }
+
+    const onUp = () => {
+      undoStackRef.current = [...undoStackRef.current.slice(-49), preDrag]
+      redoStackRef.current = []
+      setCanUndo(true)
+      setCanRedo(false)
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, [])
+
+  // ── Resize field ──────────────────────────────────────────────────────────
 
   const handleResize = useCallback((e: React.MouseEvent, fieldId: string, pw: number, ph: number) => {
     e.stopPropagation()
-    const field = fields.find(f => f.id === fieldId)
+    const cur = fieldsRef.current
+    const field = cur.find(f => f.id === fieldId)
     if (!field) return
+
+    const preDrag = [...cur]
     const startX = e.clientX, startY = e.clientY
     const origW = field.w, origH = field.h
+
     const onMove = (ev: MouseEvent) => {
       setFields(prev => prev.map(f => f.id === fieldId ? {
         ...f,
@@ -450,22 +728,130 @@ export default function BuilderClient() {
         h: Math.max(0.015, Math.min(origH + (ev.clientY - startY) / ph, 1 - f.y)),
       } : f))
     }
-    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp) }
-    document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp)
-    setSelectedFieldId(fieldId)
-  }, [fields])
 
-  const removeField = (id: string) => {
-    setFields(prev => prev.filter(f => f.id !== id))
-    if (selectedFieldId === id) setSelectedFieldId(null)
-  }
+    const onUp = () => {
+      undoStackRef.current = [...undoStackRef.current.slice(-49), preDrag]
+      redoStackRef.current = []
+      setCanUndo(true)
+      setCanRedo(false)
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
 
-  // Auto-detect fields using pdfjs text content
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    setSelectedFieldIds(new Set([fieldId]))
+  }, [])
+
+  // ── Selection ─────────────────────────────────────────────────────────────
+
+  const handleSelect = useCallback((id: string, multi: boolean) => {
+    if (multi) {
+      setSelectedFieldIds(prev => {
+        const next = new Set(prev)
+        if (next.has(id)) next.delete(id)
+        else next.add(id)
+        return next
+      })
+    } else {
+      setSelectedFieldIds(new Set([id]))
+    }
+  }, [])
+
+  // ── Remove single field (from × button or right panel) ───────────────────
+
+  const removeField = useCallback((id: string) => {
+    setFieldsWithHistory(fieldsRef.current.filter(f => f.id !== id))
+    setSelectedFieldIds(prev => {
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }, [setFieldsWithHistory])
+
+  // ── Delete all selected ───────────────────────────────────────────────────
+
+  const deleteSelected = useCallback(() => {
+    const ids = selectedFieldIdsRef.current
+    setFieldsWithHistory(fieldsRef.current.filter(f => !ids.has(f.id)))
+    setSelectedFieldIds(new Set())
+  }, [setFieldsWithHistory])
+
+  // ── Alignment ─────────────────────────────────────────────────────────────
+
+  const alignSelected = useCallback((direction: string) => {
+    const ids = [...selectedFieldIdsRef.current]
+    if (ids.length < 2) return
+    const cur = fieldsRef.current
+    const sel = cur.filter(f => ids.includes(f.id))
+
+    const minX = Math.min(...sel.map(f => f.x))
+    const maxX = Math.max(...sel.map(f => f.x + f.w))
+    const minY = Math.min(...sel.map(f => f.y))
+    const maxY = Math.max(...sel.map(f => f.y + f.h))
+
+    setFieldsWithHistory(cur.map(f => {
+      if (!ids.includes(f.id)) return f
+      switch (direction) {
+        case 'left':     return { ...f, x: minX }
+        case 'center-h': return { ...f, x: (minX + maxX) / 2 - f.w / 2 }
+        case 'right':    return { ...f, x: maxX - f.w }
+        case 'top':      return { ...f, y: minY }
+        case 'center-v': return { ...f, y: (minY + maxY) / 2 - f.h / 2 }
+        case 'bottom':   return { ...f, y: maxY - f.h }
+        case 'dist-h': {
+          if (sel.length < 3) return f
+          const sorted = [...sel].sort((a, b) => a.x - b.x)
+          const totalW = sorted.reduce((s, ff) => s + ff.w, 0)
+          const gap = (maxX - minX - totalW) / (sorted.length - 1)
+          const idx = sorted.findIndex(s => s.id === f.id)
+          let x = minX
+          for (let i = 0; i < idx; i++) x += sorted[i].w + gap
+          return { ...f, x: Math.max(0, Math.min(x, 1 - f.w)) }
+        }
+        case 'dist-v': {
+          if (sel.length < 3) return f
+          const sorted = [...sel].sort((a, b) => a.y - b.y)
+          const totalH = sorted.reduce((s, ff) => s + ff.h, 0)
+          const gap = (maxY - minY - totalH) / (sorted.length - 1)
+          const idx = sorted.findIndex(s => s.id === f.id)
+          let y = minY
+          for (let i = 0; i < idx; i++) y += sorted[i].h + gap
+          return { ...f, y: Math.max(0, Math.min(y, 1 - f.h)) }
+        }
+        default: return f
+      }
+    }))
+  }, [setFieldsWithHistory])
+
+  // ── Repeat selected fields to all pages ───────────────────────────────────
+
+  const repeatToAllPages = useCallback(() => {
+    const ids = [...selectedFieldIdsRef.current]
+    if (ids.length === 0 || numPages <= 1) return
+    const cur = fieldsRef.current
+    const sel = cur.filter(f => ids.includes(f.id))
+    const newFields: TemplateField[] = []
+    for (let p = 1; p <= numPages; p++) {
+      for (const field of sel) {
+        if (field.page === p) continue
+        newFields.push({ ...field, id: crypto.randomUUID(), page: p })
+      }
+    }
+    if (newFields.length > 0) {
+      setFieldsWithHistory([...cur, ...newFields])
+      setSavedBanner(`Added to ${numPages} pages (${newFields.length} new field${newFields.length !== 1 ? 's' : ''}).`)
+      setTimeout(() => setSavedBanner(null), 4000)
+    }
+  }, [numPages, setFieldsWithHistory])
+
+  // ── Auto-detect merge text fields ─────────────────────────────────────────
+
   const autoDetect = async () => {
     if (!pdfDoc) return
     setAutoDetecting(true)
     const newFields: TemplateField[] = []
-    let foundAnyContent = false  // true if PDF has text or form fields
+    let foundAnyContent = false
 
     for (let p = 1; p <= pdfDoc.numPages; p++) {
       const page = await pdfDoc.getPage(p)
@@ -473,7 +859,7 @@ export default function BuilderClient() {
       const pw = vp.width
       const ph = vp.height
 
-      // ── Path 1: AcroForm widget annotations (fillable/interactive PDFs) ──────
+      // Path 1: AcroForm widget annotations (fillable PDFs)
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const annotations: any[] = await page.getAnnotations()
@@ -486,56 +872,44 @@ export default function BuilderClient() {
           const name = String(w.fieldName ?? w.alternativeText ?? w.T ?? '')
           const match = matchAnnotationName(name)
           if (!match) continue
-
           const [x1, y1, x2, y2] = (w.rect as number[]) ?? [0, 0, 0, 0]
           const normX = x1 / pw
-          const normY = 1 - y2 / ph        // y2 is TOP of widget in PDF coords (y from bottom)
+          const normY = 1 - y2 / ph
           const normW = Math.max((x2 - x1) / pw, 0.08)
           const normH = Math.max((y2 - y1) / ph, 0.025)
-
           newFields.push({
-            id: crypto.randomUUID(),
-            page: p,
+            id: crypto.randomUUID(), page: p,
             x: Math.max(0, Math.min(normX, 1 - normW)),
             y: Math.max(0, Math.min(normY, 1 - normH)),
             w: normW, h: normH,
-            variable: match.variable,
-            label: match.label,
-            defaultValue: '',
-            fontSize: 10,
+            variable: match.variable, label: match.label,
+            defaultValue: '', fontSize: 10,
+            fieldType: 'merge_text', signerRoleId: null,
           })
         }
       } catch { /* annotations unavailable */ }
 
-      // ── Path 2: Text content (digitally-created PDFs with text layer) ─────────
+      // Path 2: Text content (digital PDFs with text layer)
       try {
         const content = await page.getTextContent()
         const items = content.items as Array<{ str: string; transform: number[]; width?: number }>
-
         for (const item of items) {
           const trimmed = item.str.trim()
           if (!trimmed) continue
           foundAnyContent = true
-
           for (const pattern of AUTO_DETECT_PATTERNS) {
             if (pattern.re.test(trimmed)) {
               const [, , , , tx, ty] = item.transform
-              // Place field immediately to the right of the matched label text
               const textW = (item.width ?? trimmed.length * 7)
               const fieldX = Math.max(0, Math.min((tx + textW) / pw + 0.01, 0.72))
               const fieldW = Math.min(0.26, 0.98 - fieldX)
               const fieldY = Math.max(0, Math.min(1 - ty / ph - 0.035, 0.96))
-
               newFields.push({
-                id: crypto.randomUUID(),
-                page: p,
-                x: fieldX,
-                y: fieldY,
-                w: fieldW, h: 0.04,
-                variable: pattern.variable,
-                label: pattern.label,
-                defaultValue: '',
-                fontSize: 11,
+                id: crypto.randomUUID(), page: p,
+                x: fieldX, y: fieldY, w: fieldW, h: 0.04,
+                variable: pattern.variable, label: pattern.label,
+                defaultValue: '', fontSize: 11,
+                fieldType: 'merge_text', signerRoleId: null,
               })
               break
             }
@@ -544,11 +918,11 @@ export default function BuilderClient() {
       } catch { /* text content unavailable */ }
     }
 
-    setFields(prev => [...prev, ...newFields])
+    setFieldsWithHistory([...fieldsRef.current, ...newFields])
     setAutoDetecting(false)
 
     if (!foundAnyContent) {
-      setSavedBanner('This PDF has no text layer (scanned image). Place fields manually by clicking on the PDF — auto-detect only works on digital PDFs.')
+      setSavedBanner('This PDF has no text layer (scanned image). Place fields manually — auto-detect only works on digital PDFs.')
       setTimeout(() => setSavedBanner(null), 7000)
     } else if (!newFields.length) {
       setSavedBanner('No matching field labels found. Try placing fields manually.')
@@ -559,20 +933,104 @@ export default function BuilderClient() {
     }
   }
 
-  // Save template mappings
+  // ── Detect signing fields — scan text for signing labels, propose review ──
+
+  const detectSigningFields = async () => {
+    if (!pdfDoc) return
+    setDetectingSignFields(true)
+    const suggestions: DetectedSuggestion[] = []
+
+    for (let p = 1; p <= pdfDoc.numPages; p++) {
+      const page = await pdfDoc.getPage(p)
+      const vp = page.getViewport({ scale: 1 })
+      const pw = vp.width
+      const ph = vp.height
+
+      try {
+        const content = await page.getTextContent()
+        const items = content.items as Array<{ str: string; transform: number[]; width?: number }>
+        for (const item of items) {
+          const trimmed = item.str.trim()
+          if (!trimmed || trimmed.length < 3) continue
+          for (const pat of SIGNING_DETECT_PATTERNS) {
+            if (!pat.re.test(trimmed)) continue
+            const role = signerRoles.find(r => r.name.toLowerCase() === pat.roleKey.toLowerCase())
+            const [, , , , tx, ty] = item.transform
+            const fw = pat.fieldType === 'signature' ? 0.28 : 0.16
+            const fh = pat.fieldType === 'signature' ? 0.06 : 0.04
+            const fx = Math.max(0, Math.min(tx / pw, 0.70))
+            const fy = Math.max(0, Math.min(1 - ty / ph - fh / 2, 0.96 - fh))
+            suggestions.push({
+              label: pat.displayLabel,
+              fieldType: pat.fieldType,
+              signerRoleId: role?.id ?? null,
+              roleName: role?.name ?? (pat.roleKey || 'Unknown'),
+              page: p, x: fx, y: fy, w: fw, h: fh,
+            })
+            break
+          }
+        }
+      } catch { /* text unavailable */ }
+    }
+
+    setDetectingSignFields(false)
+    if (suggestions.length === 0) {
+      setSavedBanner('No signing labels detected. Place signing fields manually from the left panel.')
+      setTimeout(() => setSavedBanner(null), 5000)
+      return
+    }
+    setDetectedSuggestions(suggestions)
+    setShowDetectModal(true)
+  }
+
+  const acceptSuggestion = (s: DetectedSuggestion) => {
+    const newField: TemplateField = {
+      id: crypto.randomUUID(),
+      page: s.page, x: s.x, y: s.y, w: s.w, h: s.h,
+      variable: '', label: s.label,
+      defaultValue: '', fontSize: 11,
+      fieldType: s.fieldType, signerRoleId: s.signerRoleId,
+    }
+    setFieldsWithHistory([...fieldsRef.current, newField])
+  }
+
+  const acceptAllSuggestions = () => {
+    const newFields = detectedSuggestions.map(s => ({
+      id: crypto.randomUUID(),
+      page: s.page, x: s.x, y: s.y, w: s.w, h: s.h,
+      variable: '', label: s.label,
+      defaultValue: '', fontSize: 11,
+      fieldType: s.fieldType, signerRoleId: s.signerRoleId,
+    }))
+    setFieldsWithHistory([...fieldsRef.current, ...newFields])
+    setShowDetectModal(false)
+    setSavedBanner(`Added ${newFields.length} signing field${newFields.length !== 1 ? 's' : ''}. Review roles in the right panel.`)
+    setTimeout(() => setSavedBanner(null), 5000)
+  }
+
+  // ── Save / Publish ────────────────────────────────────────────────────────
+
   const save = async () => {
     if (!templateId) return
     setSaving(true)
     try {
-      const res = await fetch(`/api/contract-templates/${templateId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ field_mappings: fields, name: templateName }),
-      })
-      if (res.ok) {
+      const [nameRes, fieldsRes] = await Promise.all([
+        fetch(`/api/contract-templates/${templateId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: templateName }),
+        }),
+        fetch(`/api/contract-templates/${templateId}/fields`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: fieldsRef.current }),
+        }),
+      ])
+      if (nameRes.ok && fieldsRes.ok) {
         setSavedBanner('Template saved!')
       } else {
-        const d = await res.json()
+        const failed = nameRes.ok ? fieldsRes : nameRes
+        const d = await failed.json()
         setSavedBanner(d.error ?? 'Save failed.')
       }
     } catch {
@@ -583,15 +1041,51 @@ export default function BuilderClient() {
     }
   }
 
-  const selectedField = fields.find(f => f.id === selectedFieldId) ?? null
+  const publish = async () => {
+    if (!templateId) return
+    setPublishing(true)
+    try {
+      await fetch(`/api/contract-templates/${templateId}/fields`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: fieldsRef.current }),
+      })
+      const res = await fetch(`/api/contract-templates/${templateId}/publish`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      if (res.ok) {
+        const d = await res.json()
+        const label = d.version?.version_label ?? 'v1.0'
+        setCurrentVersionLabel(label)
+        setSavedBanner(`Published ${label}!`)
+      } else {
+        const d = await res.json()
+        setSavedBanner(d.error ?? 'Publish failed.')
+      }
+    } catch {
+      setSavedBanner('Publish failed.')
+    } finally {
+      setPublishing(false)
+      setTimeout(() => setSavedBanner(null), 5000)
+    }
+  }
 
-  // ── Source picker ─────────────────────────────────────────────────────────────
+  // ── Derived ───────────────────────────────────────────────────────────────
+
+  const selectedCount = selectedFieldIds.size
+  const selectedField = selectedCount === 1
+    ? fields.find(f => selectedFieldIds.has(f.id)) ?? null
+    : null
+  const hasActiveTool = !!activeVariable || !!(activeSigningFieldType && activeSigningRoleId)
+
+  // ── Source picker ─────────────────────────────────────────────────────────
 
   if (step === 'source') {
     return (
       <div style={{ minHeight: '100vh', backgroundColor: 'var(--c-bg)', color: 'var(--c-primary)' }}>
         <div style={{ maxWidth: 680, margin: '0 auto', padding: '48px 24px' }}>
-
           <div style={{ marginBottom: 32 }}>
             <a href="/documents/templates" style={{ fontSize: 13, color: 'var(--c-text-2)', textDecoration: 'none' }}>
               ← Templates
@@ -602,7 +1096,6 @@ export default function BuilderClient() {
             </p>
           </div>
 
-          {/* Upload new */}
           <div style={{
             backgroundColor: 'var(--c-card)', border: '2px dashed var(--c-border)', borderRadius: 14,
             padding: '28px 24px', marginBottom: 24, cursor: 'pointer', textAlign: 'center',
@@ -626,7 +1119,6 @@ export default function BuilderClient() {
             {uploadError && <p style={{ fontSize: 12, color: '#ef4444', marginTop: 8 }}>{uploadError}</p>}
           </div>
 
-          {/* From existing library */}
           {contractsLoading ? (
             <div style={{ padding: 32, textAlign: 'center', color: 'var(--c-text-2)', fontSize: 13 }}>Loading library…</div>
           ) : contracts.length > 0 && (
@@ -645,7 +1137,7 @@ export default function BuilderClient() {
                       <p style={{ fontWeight: 600, fontSize: 14 }}>{c.name}</p>
                       <p style={{ fontSize: 11, color: 'var(--c-text-2)' }}>
                         {c.category}{c.page_count ? ` · ${c.page_count}p` : ''}
-                        {c.field_mappings?.length ? ` · ${c.field_mappings.length} mapped fields` : ''}
+                        {c.draft_field_count > 0 ? ` · ${c.draft_field_count} draft fields` : c.current_version_id ? ' · Published' : ''}
                       </p>
                     </div>
                     <button
@@ -656,7 +1148,7 @@ export default function BuilderClient() {
                         border: '1px solid rgba(201,168,76,0.3)', cursor: 'pointer',
                       }}
                     >
-                      {c.field_mappings?.length ? 'Edit Fields' : 'Add Fields'}
+                      {(c.draft_field_count > 0 || !!c.current_version_id) ? 'Edit Fields' : 'Add Fields'}
                     </button>
                   </div>
                 ))}
@@ -668,12 +1160,12 @@ export default function BuilderClient() {
     )
   }
 
-  // ── Builder ───────────────────────────────────────────────────────────────────
+  // ── Builder ───────────────────────────────────────────────────────────────
 
   return (
     <div className="flex h-screen overflow-hidden" style={{ backgroundColor: 'var(--c-bg)' }}>
 
-      {/* Left panel — variable picker */}
+      {/* ── Left panel ── */}
       <div className="w-56 shrink-0 flex flex-col border-r overflow-y-auto"
         style={{ backgroundColor: 'var(--c-card)', borderColor: 'var(--c-border)' }}>
 
@@ -697,7 +1189,7 @@ export default function BuilderClient() {
 
         <div className="p-3 shrink-0 border-b" style={{ borderColor: 'var(--c-border)' }}>
           <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--c-text-3)' }}>
-            Select Variable — then click PDF
+            Merge Variables
           </p>
           {VARIABLE_GROUPS.map(group => (
             <div key={group.category} className="mb-3">
@@ -707,7 +1199,11 @@ export default function BuilderClient() {
               {group.items.map(item => (
                 <button
                   key={item.variable}
-                  onClick={() => setActiveVariable(prev => prev === item.variable ? null : item.variable)}
+                  onClick={() => {
+                    setActiveVariable(prev => prev === item.variable ? null : item.variable)
+                    setActiveSigningFieldType(null)
+                    setActiveSigningRoleId(null)
+                  }}
                   className="w-full text-left text-[11px] font-semibold px-2 py-1 rounded-lg mb-0.5"
                   style={{
                     backgroundColor: activeVariable === item.variable ? `${group.color}20` : 'transparent',
@@ -722,7 +1218,55 @@ export default function BuilderClient() {
           ))}
         </div>
 
-        {activeVariable ? (
+        {/* Signing Fields */}
+        {signerRoles.length > 0 && (
+          <div className="p-3 shrink-0 border-t" style={{ borderColor: 'var(--c-border)' }}>
+            <p className="text-[9px] font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--c-text-3)' }}>
+              Signing Fields
+            </p>
+            {signerRoles.map(role => {
+              const sigActive = activeSigningFieldType === 'signature' && activeSigningRoleId === role.id
+              const iniActive = activeSigningFieldType === 'initial'  && activeSigningRoleId === role.id
+              const rc = role.color || '#7B8FD4'
+              return (
+                <div key={role.id} className="mb-2">
+                  <p className="text-[9px] font-bold uppercase mb-1" style={{ color: rc }}>{role.name}</p>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <button
+                      onClick={() => {
+                        setActiveSigningFieldType(sigActive ? null : 'signature')
+                        setActiveSigningRoleId(sigActive ? null : role.id)
+                        setActiveVariable(null)
+                      }}
+                      className="flex-1 text-[10px] font-semibold px-1 py-1 rounded-lg"
+                      style={{
+                        backgroundColor: sigActive ? `${rc}22` : 'transparent',
+                        color: sigActive ? rc : 'var(--c-text-2)',
+                        border: `1px solid ${sigActive ? rc : 'var(--c-border)'}`,
+                      }}
+                    >✍ Sig</button>
+                    <button
+                      onClick={() => {
+                        setActiveSigningFieldType(iniActive ? null : 'initial')
+                        setActiveSigningRoleId(iniActive ? null : role.id)
+                        setActiveVariable(null)
+                      }}
+                      className="flex-1 text-[10px] font-semibold px-1 py-1 rounded-lg"
+                      style={{
+                        backgroundColor: iniActive ? `${rc}22` : 'transparent',
+                        color: iniActive ? rc : 'var(--c-text-2)',
+                        border: `1px solid ${iniActive ? rc : 'var(--c-border)'}`,
+                      }}
+                    >INI</button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {/* Active tool hint */}
+        {hasActiveTool ? (
           <div className="p-3 shrink-0">
             <p className="text-[10px] font-bold text-center" style={{ color: '#C9A84C' }}>
               Click on the PDF to place ↓
@@ -731,17 +1275,28 @@ export default function BuilderClient() {
         ) : (
           <div className="p-3 shrink-0">
             <p className="text-[10px] text-center" style={{ color: 'var(--c-text-3)' }}>
-              Select a variable above
+              Select a variable or signing field above
             </p>
           </div>
         )}
+
+        {/* Keyboard hint */}
+        <div className="p-3 border-t mt-auto shrink-0" style={{ borderColor: 'var(--c-border)' }}>
+          <p className="text-[8px] leading-relaxed" style={{ color: 'var(--c-text-3)' }}>
+            <strong style={{ color: 'var(--c-text-2)' }}>Shortcuts</strong><br />
+            ⌫ Delete · ⌘C Copy · ⌘V Paste<br />
+            ⌘D Duplicate · ⌘Z Undo · ⌘⇧Z Redo<br />
+            ↑↓←→ Nudge · ⇧+Arrow Large nudge<br />
+            ⇧+Click Multi-select · Esc Deselect
+          </p>
+        </div>
       </div>
 
-      {/* PDF area */}
+      {/* ── PDF area ── */}
       <div
         className="flex-1 overflow-auto p-8"
         style={{ backgroundColor: '#d1d5db' }}
-        onClick={() => { if (!activeVariable) setSelectedFieldId(null) }}
+        onClick={() => { if (!hasActiveTool) setSelectedFieldIds(new Set()) }}
       >
         {pdfLoading && (
           <div className="flex items-center justify-center h-full">
@@ -758,9 +1313,11 @@ export default function BuilderClient() {
                 scale={Math.min(800 / 612, 1.5)}
                 fields={fields}
                 activeVariable={activeVariable}
-                selectedFieldId={selectedFieldId}
+                selectedFieldIds={selectedFieldIds}
+                hasActiveTool={hasActiveTool}
+                signerRoles={signerRoles}
                 onPlace={handlePlace}
-                onSelect={setSelectedFieldId}
+                onSelect={handleSelect}
                 onDelete={removeField}
                 onDrag={handleDrag}
                 onResize={handleResize}
@@ -776,39 +1333,88 @@ export default function BuilderClient() {
         )}
       </div>
 
-      {/* Right panel — field properties + actions */}
+      {/* ── Right panel ── */}
       <div className="w-52 shrink-0 flex flex-col border-l"
         style={{ backgroundColor: 'var(--c-card)', borderColor: 'var(--c-border)' }}>
 
         <div className="flex-1 overflow-y-auto p-4">
-          {selectedField ? (
+
+          {/* ── Single field properties ── */}
+          {selectedField && selectedCount === 1 && (
             <>
               <p className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--c-text-3)' }}>
                 Field Properties
               </p>
               <div className="space-y-3">
+                {/* Type badge */}
                 <div>
-                  <label className="text-[10px] font-semibold block mb-1" style={{ color: 'var(--c-text-3)' }}>Variable</label>
-                  <select
-                    value={selectedField.variable}
-                    onChange={e => {
-                      const v = e.target.value
-                      setFields(prev => prev.map(f => f.id === selectedField.id
-                        ? { ...f, variable: v, label: variableLabel(v) }
-                        : f))
-                    }}
-                    className="w-full text-[10px] px-2 py-1.5 rounded-lg focus:outline-none"
-                    style={{ backgroundColor: 'var(--c-input-bg)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }}
-                  >
-                    {VARIABLE_GROUPS.map(g => (
-                      <optgroup key={g.category} label={g.category}>
-                        {g.items.map(i => (
-                          <option key={i.variable} value={i.variable}>{i.label}</option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
+                  <label className="text-[10px] font-semibold block mb-1" style={{ color: 'var(--c-text-3)' }}>Type</label>
+                  <div className="text-[10px] px-2 py-1.5 rounded-lg font-semibold"
+                    style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+                    {selectedField.fieldType === 'signature' ? '✍ Signature'
+                      : selectedField.fieldType === 'initial' ? 'INI Initials'
+                      : selectedField.fieldType === 'date' ? '📅 Date'
+                      : selectedField.fieldType === 'checkbox' ? '☑ Checkbox'
+                      : 'T Merge Text'}
+                  </div>
                 </div>
+
+                {/* Signer Role — signature/initial only */}
+                {(selectedField.fieldType === 'signature' || selectedField.fieldType === 'initial') && (
+                  <div>
+                    <label className="text-[10px] font-semibold block mb-1" style={{ color: 'var(--c-text-3)' }}>Signer Role</label>
+                    <select
+                      value={selectedField.signerRoleId ?? ''}
+                      onChange={e => {
+                        const roleId = e.target.value || null
+                        const role = signerRoles.find(r => r.id === roleId)
+                        setFields(prev => prev.map(f => f.id === selectedField.id ? {
+                          ...f,
+                          signerRoleId: roleId,
+                          label: role
+                            ? `${role.name} ${f.fieldType === 'signature' ? 'Signature' : 'Initials'}`
+                            : f.label,
+                        } : f))
+                      }}
+                      className="w-full text-[10px] px-2 py-1.5 rounded-lg focus:outline-none"
+                      style={{ backgroundColor: 'var(--c-input-bg)', border: `1px solid ${selectedField.signerRoleId ? 'var(--c-border)' : '#ef4444'}`, color: 'var(--c-primary)' }}
+                    >
+                      <option value="">— Select role —</option>
+                      {signerRoles.map(r => (
+                        <option key={r.id} value={r.id}>{r.name}</option>
+                      ))}
+                    </select>
+                    {!selectedField.signerRoleId && (
+                      <p className="text-[9px] mt-0.5" style={{ color: '#ef4444' }}>Role required to request signatures</p>
+                    )}
+                  </div>
+                )}
+
+                {/* Variable — merge_text only */}
+                {selectedField.fieldType !== 'signature' && selectedField.fieldType !== 'initial' && (
+                  <div>
+                    <label className="text-[10px] font-semibold block mb-1" style={{ color: 'var(--c-text-3)' }}>Variable</label>
+                    <select
+                      value={selectedField.variable}
+                      onChange={e => {
+                        const v = e.target.value
+                        setFields(prev => prev.map(f => f.id === selectedField.id
+                          ? { ...f, variable: v, label: variableLabel(v) } : f))
+                      }}
+                      className="w-full text-[10px] px-2 py-1.5 rounded-lg focus:outline-none"
+                      style={{ backgroundColor: 'var(--c-input-bg)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }}
+                    >
+                      {VARIABLE_GROUPS.map(g => (
+                        <optgroup key={g.category} label={g.category}>
+                          {g.items.map(i => (
+                            <option key={i.variable} value={i.variable}>{i.label}</option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
                 <div>
                   <label className="text-[10px] font-semibold block mb-1" style={{ color: 'var(--c-text-3)' }}>Label</label>
                   <input
@@ -818,49 +1424,171 @@ export default function BuilderClient() {
                     style={{ backgroundColor: 'var(--c-input-bg)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }}
                   />
                 </div>
-                <div>
-                  <label className="text-[10px] font-semibold block mb-1" style={{ color: 'var(--c-text-3)' }}>Default Value</label>
-                  <input
-                    value={selectedField.defaultValue}
-                    onChange={e => setFields(prev => prev.map(f => f.id === selectedField.id ? { ...f, defaultValue: e.target.value } : f))}
-                    placeholder="Leave blank to auto-fill"
-                    className="w-full text-xs px-2 py-1.5 rounded-lg focus:outline-none"
-                    style={{ backgroundColor: 'var(--c-input-bg)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }}
-                  />
+
+                {selectedField.fieldType !== 'signature' && selectedField.fieldType !== 'initial' && (
+                  <>
+                    <div>
+                      <label className="text-[10px] font-semibold block mb-1" style={{ color: 'var(--c-text-3)' }}>Default Value</label>
+                      <input
+                        value={selectedField.defaultValue}
+                        onChange={e => setFields(prev => prev.map(f => f.id === selectedField.id ? { ...f, defaultValue: e.target.value } : f))}
+                        placeholder="Leave blank to auto-fill"
+                        className="w-full text-xs px-2 py-1.5 rounded-lg focus:outline-none"
+                        style={{ backgroundColor: 'var(--c-input-bg)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-semibold block mb-1" style={{ color: 'var(--c-text-3)' }}>Font Size</label>
+                      <input
+                        type="number" min={7} max={24}
+                        value={selectedField.fontSize}
+                        onChange={e => setFields(prev => prev.map(f => f.id === selectedField.id ? { ...f, fontSize: Number(e.target.value) } : f))}
+                        className="w-full text-xs px-2 py-1.5 rounded-lg focus:outline-none"
+                        style={{ backgroundColor: 'var(--c-input-bg)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }}
+                      />
+                    </div>
+                  </>
+                )}
+
+                {/* Single-field actions */}
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <button
+                    onClick={() => {
+                      const f = fields.find(ff => ff.id === selectedField.id)
+                      if (f) {
+                        setClipboard([f])
+                        const duped = { ...f, id: crypto.randomUUID(), x: Math.min(f.x + 0.02, 0.95), y: Math.min(f.y + 0.02, 0.95) }
+                        setFieldsWithHistory([...fieldsRef.current, duped])
+                        setSelectedFieldIds(new Set([duped.id]))
+                      }
+                    }}
+                    className="flex-1 text-[10px] font-semibold py-1.5 rounded-lg hover:opacity-80"
+                    style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}
+                  >⧉ Dup</button>
+                  <button
+                    onClick={() => removeField(selectedField.id)}
+                    className="flex-1 text-[10px] font-semibold py-1.5 rounded-lg hover:opacity-80"
+                    style={{ backgroundColor: 'rgba(239,68,68,0.08)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.25)' }}
+                  >✕ Del</button>
                 </div>
-                <div>
-                  <label className="text-[10px] font-semibold block mb-1" style={{ color: 'var(--c-text-3)' }}>Font Size</label>
-                  <input
-                    type="number" min={7} max={24}
-                    value={selectedField.fontSize}
-                    onChange={e => setFields(prev => prev.map(f => f.id === selectedField.id ? { ...f, fontSize: Number(e.target.value) } : f))}
-                    className="w-full text-xs px-2 py-1.5 rounded-lg focus:outline-none"
-                    style={{ backgroundColor: 'var(--c-input-bg)', border: '1px solid var(--c-border)', color: 'var(--c-primary)' }}
-                  />
-                </div>
-                <button
-                  onClick={() => removeField(selectedField.id)}
-                  className="w-full text-xs font-semibold py-1.5 rounded-lg hover:opacity-80"
-                  style={{ backgroundColor: 'rgba(239,68,68,0.08)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.25)' }}
-                >
-                  Delete Field
-                </button>
+
+                {/* Repeat to pages — single field */}
+                {numPages > 1 && (
+                  <button
+                    onClick={repeatToAllPages}
+                    className="w-full text-[10px] font-semibold py-1.5 rounded-lg hover:opacity-80"
+                    style={{ backgroundColor: 'rgba(107,189,224,0.1)', color: '#6ABDE0', border: '1px solid rgba(107,189,224,0.25)' }}
+                  >
+                    ↕ Repeat on all {numPages} pages
+                  </button>
+                )}
               </div>
             </>
-          ) : (
+          )}
+
+          {/* ── Multi-select panel ── */}
+          {selectedCount >= 2 && (
+            <>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--c-text-3)' }}>
+                {selectedCount} Fields Selected
+              </p>
+
+              {/* Alignment tools */}
+              <div className="mb-3">
+                <p className="text-[9px] font-bold uppercase tracking-wider mb-1.5" style={{ color: 'var(--c-text-3)' }}>Align</p>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 3 }}>
+                  {ALIGN_BUTTONS.map(btn => (
+                    <button
+                      key={btn.key}
+                      title={btn.title}
+                      onClick={() => alignSelected(btn.key)}
+                      className="text-[9px] font-mono font-bold py-1 rounded-lg hover:opacity-80"
+                      style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}
+                    >
+                      {btn.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Repeat to pages */}
+              {numPages > 1 && (
+                <button
+                  onClick={repeatToAllPages}
+                  className="w-full text-[10px] font-semibold py-1.5 rounded-lg hover:opacity-80 mb-2"
+                  style={{ backgroundColor: 'rgba(107,189,224,0.1)', color: '#6ABDE0', border: '1px solid rgba(107,189,224,0.25)' }}
+                >
+                  ↕ Repeat on all {numPages} pages
+                </button>
+              )}
+
+              {/* Duplicate group */}
+              <button
+                onClick={() => {
+                  const ids = [...selectedFieldIds]
+                  const sel = fieldsRef.current.filter(f => ids.includes(f.id))
+                  const duped = sel.map(f => ({ ...f, id: crypto.randomUUID(), x: Math.min(f.x + 0.02, 0.95), y: Math.min(f.y + 0.02, 0.95) }))
+                  setFieldsWithHistory([...fieldsRef.current, ...duped])
+                  setSelectedFieldIds(new Set(duped.map(f => f.id)))
+                }}
+                className="w-full text-[10px] font-semibold py-1.5 rounded-lg hover:opacity-80 mb-2"
+                style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}
+              >
+                ⧉ Duplicate Group
+              </button>
+
+              <button
+                onClick={deleteSelected}
+                className="w-full text-[10px] font-semibold py-1.5 rounded-lg hover:opacity-80"
+                style={{ backgroundColor: 'rgba(239,68,68,0.08)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.25)' }}
+              >
+                ✕ Delete {selectedCount} Fields
+              </button>
+            </>
+          )}
+
+          {/* ── Empty state ── */}
+          {selectedCount === 0 && (
             <div className="text-center pt-8">
               <p className="text-[11px]" style={{ color: 'var(--c-text-3)' }}>
-                {activeVariable
+                {hasActiveTool
                   ? 'Click on the PDF to place a field'
-                  : 'Select a field or variable to get started'}
+                  : 'Select a field to edit · Shift+click to multi-select'}
               </p>
             </div>
           )}
         </div>
 
+        {/* ── Bottom action buttons ── */}
         <div className="p-4 border-t space-y-2 shrink-0" style={{ borderColor: 'var(--c-border)' }}>
+          {/* Undo / Redo */}
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button
+              onClick={undo}
+              disabled={!canUndo}
+              title="Undo (⌘Z)"
+              className="flex-1 py-1.5 rounded-xl text-xs font-bold hover:opacity-80 disabled:opacity-30"
+              style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}
+            >↩ Undo</button>
+            <button
+              onClick={redo}
+              disabled={!canRedo}
+              title="Redo (⌘⇧Z)"
+              className="flex-1 py-1.5 rounded-xl text-xs font-bold hover:opacity-80 disabled:opacity-30"
+              style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}
+            >↪ Redo</button>
+          </div>
+
+          {currentVersionLabel && (
+            <div className="text-center">
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                style={{ backgroundColor: 'rgba(74,207,154,0.12)', color: '#4ACF9A', border: '1px solid rgba(74,207,154,0.3)' }}>
+                Published {currentVersionLabel}
+              </span>
+            </div>
+          )}
           {savedBanner && (
-            <p className="text-xs text-center font-semibold" style={{ color: savedBanner.includes('failed') || savedBanner.includes('No') ? '#ef4444' : '#4ACF9A' }}>
+            <p className="text-xs text-center font-semibold" style={{ color: savedBanner.includes('failed') || savedBanner.includes('No ') ? '#ef4444' : '#4ACF9A' }}>
               {savedBanner}
             </p>
           )}
@@ -873,12 +1601,28 @@ export default function BuilderClient() {
             {autoDetecting ? 'Detecting…' : '✦ Auto Detect Fields'}
           </button>
           <button
+            onClick={detectSigningFields}
+            disabled={detectingSignFields || !pdfDoc}
+            className="w-full py-2 rounded-xl text-xs font-bold hover:opacity-80 disabled:opacity-40"
+            style={{ backgroundColor: 'rgba(123,143,212,0.1)', color: '#7B8FD4', border: '1px solid rgba(123,143,212,0.3)' }}
+          >
+            {detectingSignFields ? 'Scanning…' : '✍ Detect Signing Fields'}
+          </button>
+          <button
             onClick={save}
-            disabled={saving}
+            disabled={saving || publishing}
+            className="w-full py-2.5 rounded-xl font-bold text-sm hover:opacity-90 disabled:opacity-40"
+            style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-primary)', border: '1px solid var(--c-border)' }}
+          >
+            {saving ? 'Saving…' : 'Save Draft'}
+          </button>
+          <button
+            onClick={publish}
+            disabled={publishing || saving}
             className="w-full py-3 rounded-xl font-bold text-sm hover:opacity-90 disabled:opacity-40"
             style={{ backgroundColor: '#0A1F44', color: '#C9A84C' }}
           >
-            {saving ? 'Saving…' : 'Save Template'}
+            {publishing ? 'Publishing…' : '⬆ Publish Version'}
           </button>
           <a
             href="/documents/templates"
@@ -889,6 +1633,97 @@ export default function BuilderClient() {
           </a>
         </div>
       </div>
+
+      {/* ── Detected Signing Fields Modal ── */}
+      {showDetectModal && detectedSuggestions.length > 0 && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 999,
+            backgroundColor: 'rgba(0,0,0,0.55)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+          onClick={e => { if (e.target === e.currentTarget) setShowDetectModal(false) }}
+        >
+          <div style={{
+            backgroundColor: 'var(--c-card)', borderRadius: 16, padding: 24, width: 440,
+            maxHeight: '80vh', display: 'flex', flexDirection: 'column',
+            border: '1px solid var(--c-border)',
+            boxShadow: '0 20px 60px rgba(0,0,0,0.4)',
+          }}>
+            <div style={{ marginBottom: 16 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>
+                Detected Signing Labels
+              </h2>
+              <p style={{ fontSize: 12, color: 'var(--c-text-2)' }}>
+                {detectedSuggestions.length} potential signing field{detectedSuggestions.length !== 1 ? 's' : ''} found.
+                Review and accept the ones you want to place.
+              </p>
+            </div>
+
+            <div style={{ flex: 1, overflowY: 'auto', marginBottom: 16 }}>
+              {detectedSuggestions.map((s, idx) => (
+                <div key={idx} style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  padding: '10px 0', borderBottom: '1px solid var(--c-border)',
+                }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ fontSize: 13, fontWeight: 600 }}>
+                      {s.fieldType === 'signature' ? '✍' : 'INI'} {s.label}
+                    </p>
+                    <p style={{ fontSize: 11, color: 'var(--c-text-2)' }}>
+                      Page {s.page} · Role: <strong>{s.roleName || 'Unknown'}</strong>
+                      {!s.signerRoleId && (
+                        <span style={{ color: '#f59e0b', marginLeft: 6 }}>⚠ no role matched</span>
+                      )}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      acceptSuggestion(s)
+                      setDetectedSuggestions(prev => prev.filter((_, i) => i !== idx))
+                      if (detectedSuggestions.length === 1) setShowDetectModal(false)
+                    }}
+                    style={{
+                      padding: '5px 12px', borderRadius: 8, fontSize: 11, fontWeight: 700,
+                      backgroundColor: 'rgba(74,207,154,0.12)', color: '#4ACF9A',
+                      border: '1px solid rgba(74,207,154,0.3)', cursor: 'pointer',
+                    }}
+                  >Accept</button>
+                  <button
+                    onClick={() => {
+                      setDetectedSuggestions(prev => prev.filter((_, i) => i !== idx))
+                      if (detectedSuggestions.length === 1) setShowDetectModal(false)
+                    }}
+                    style={{
+                      padding: '5px 10px', borderRadius: 8, fontSize: 11, fontWeight: 700,
+                      backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)',
+                      border: '1px solid var(--c-border)', cursor: 'pointer',
+                    }}
+                  >Skip</button>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={acceptAllSuggestions}
+                style={{
+                  flex: 1, padding: '10px 0', borderRadius: 10, fontSize: 13, fontWeight: 700,
+                  backgroundColor: '#0A1F44', color: '#C9A84C', border: 'none', cursor: 'pointer',
+                }}
+              >Accept All ({detectedSuggestions.length})</button>
+              <button
+                onClick={() => setShowDetectModal(false)}
+                style={{
+                  padding: '10px 18px', borderRadius: 10, fontSize: 13, fontWeight: 600,
+                  backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)',
+                  border: '1px solid var(--c-border)', cursor: 'pointer',
+                }}
+              >Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   )

@@ -4,12 +4,13 @@
  * Property Search — Step 2: Results
  *
  * This page shows everything that matched the criteria built on Step 1.
- * The table dominates the screen. Criteria chips at the top remind the investor
- * what they searched for and allow quick modifications.
+ * The table dominates the screen. Clicking a row navigates directly to the
+ * canonical /properties/[id] workspace — no intermediate drawer.
  */
 
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import type { PropertySearchResult } from '@/lib/enrichment/types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -112,513 +113,94 @@ function buildChips(params: URLSearchParams): { key: string; label: string }[] {
   return chips
 }
 
-// ─── Property Detail Drawer ───────────────────────────────────────────────────
+// ─── Safe JSON parse (returns null if body is empty or not JSON) ──────────────
 
-type DrawerTab = 'overview' | 'case' | 'comps'
-
-function DRow({ label, value }: { label: string; value?: React.ReactNode }) {
-  if (!value && value !== 0) return null
-  return (
-    <div className="flex items-start justify-between py-2" style={{ borderBottom: '1px solid var(--c-border)' }}>
-      <span className="text-xs shrink-0 w-32 pt-0.5" style={{ color: 'var(--c-text-2)' }}>{label}</span>
-      <span className="text-sm font-medium text-right" style={{ color: 'var(--c-primary)' }}>{value}</span>
-    </div>
-  )
+async function safeJson(res: Response): Promise<Record<string, unknown> | null> {
+  const ct = res.headers.get('content-type') ?? ''
+  if (!ct.includes('application/json')) return null
+  try { return await res.json() } catch { return null }
 }
 
-function DrawerCaseNumberRow({
-  propertyId,
-  initialValue,
-  onSaved,
-}: {
-  propertyId: string | null
-  initialValue: string | null
-  onSaved: (val: string) => void
-}) {
-  const [editing, setEditing]   = useState(false)
-  const [value,   setValue]     = useState(initialValue ?? '')
-  const [saving,  setSaving]    = useState(false)
-  const [error,   setError]     = useState('')
-  const inputRef = useRef<HTMLInputElement>(null)
+// ─── SessionStorage cache (back-nav safe, 5-min TTL) ─────────────────────────
 
-  useEffect(() => { setValue(initialValue ?? '') }, [initialValue])
+const CACHE_TTL_MS = 5 * 60 * 1000
 
-  const startEdit = () => {
-    if (!propertyId) return
-    setEditing(true); setError('')
-    setTimeout(() => inputRef.current?.focus(), 50)
-  }
-  const cancel = () => { setEditing(false); setValue(initialValue ?? ''); setError('') }
-  const save = async () => {
-    const trimmed = value.trim()
-    if (!trimmed || !propertyId) return
-    setSaving(true); setError('')
-    try {
-      const res = await fetch(`/api/properties/${propertyId}/case-number`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ case_number: trimmed }),
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      onSaved(trimmed); setEditing(false)
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Save failed')
-    } finally { setSaving(false) }
-  }
-
-  const hasValue  = Boolean(initialValue)
-  const canEdit   = Boolean(propertyId) // can only edit saved properties
-
-  return (
-    <div className="flex items-center justify-between py-2" style={{ borderBottom: '1px solid var(--c-border)' }}>
-      <span className="text-xs shrink-0 w-32" style={{ color: 'var(--c-text-2)' }}>Case Number</span>
-      {editing ? (
-        <div className="flex items-center gap-2">
-          <input ref={inputRef} type="text" value={value}
-            onChange={e => setValue(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') cancel() }}
-            placeholder="e.g. CACE-25-012345"
-            className="text-xs rounded-lg px-2 py-1 w-36"
-            style={{ backgroundColor: 'var(--c-card-alt)', border: '1px solid var(--c-border)', color: 'var(--c-primary)', outline: 'none' }} />
-          <button onClick={save} disabled={saving}
-            className="text-xs px-2 py-1 rounded-lg"
-            style={{ backgroundColor: 'rgba(76,175,154,0.15)', color: '#4CAF9A', border: '1px solid rgba(76,175,154,0.3)' }}>
-            {saving ? '…' : '✓'}
-          </button>
-          <button onClick={cancel}
-            className="text-xs px-2 py-1 rounded-lg"
-            style={{ backgroundColor: 'rgba(255,255,255,0.05)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
-            ✕
-          </button>
-        </div>
-      ) : (
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium"
-            style={{ color: hasValue ? 'var(--c-primary)' : 'rgba(255,255,255,0.25)', fontStyle: hasValue ? 'normal' : 'italic' }}>
-            {hasValue ? initialValue : canEdit ? 'Pending lookup' : 'Save first'}
-          </span>
-          {canEdit && (
-            <button onClick={startEdit} title="Edit case number" className="text-xs hover:opacity-80"
-              style={{ color: 'rgba(255,255,255,0.35)' }}>✎</button>
-          )}
-        </div>
-      )}
-      {error && <span className="text-[10px] ml-2" style={{ color: '#ef4444' }}>{error}</span>}
-    </div>
-  )
+interface CachePayload {
+  properties: Lead[]
+  total: number
+  page: number
+  pages: number
+  db_fallback?: string | null
 }
 
-const COUNTY_CLERK_URLS: Record<string, string> = {
-  'miami-dade': 'https://www.miami-dadeclerk.com/ocs/CaseSearch.aspx',
-  'broward':    'https://www.browardclerk.org/Web2/CaseSearch',
-  'palm-beach': 'https://courtrecords.mypalmbeachclerk.com/DORIS',
+function srCacheKey(params: URLSearchParams): string {
+  return `psr:${params.toString()}`
 }
 
-// ─── Drawer Comps Panel ───────────────────────────────────────────────────────
-
-interface DrawerComp {
-  mls_number:     string | null
-  address:        string
-  city:           string
-  status:         string
-  beds:           number | null
-  baths:          number | null
-  living_area:    number | null
-  year_built:     number | null
-  list_price:     number | null
-  sold_price:     number | null
-  price_per_sqft: number | null
-  sold_date:      string | null
-  days_on_market: number | null
-  distance_miles: number | null
-}
-interface DrawerCompsResult {
-  sold:               DrawerComp[]
-  active:             DrawerComp[]
-  pending:            DrawerComp[]
-  median_sold_price:  number | null
-  avg_price_per_sqft: number | null
+function srCacheRead(key: string): CachePayload | null {
+  try {
+    const raw = sessionStorage.getItem(key)
+    if (!raw) return null
+    const { data, ts } = JSON.parse(raw) as { data: CachePayload; ts: number }
+    if (Date.now() - ts > CACHE_TTL_MS) { sessionStorage.removeItem(key); return null }
+    return data
+  } catch { return null }
 }
 
-function DrawerComps({ lead }: { lead: Lead }) {
-  const [result,  setResult]  = useState<DrawerCompsResult | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [error,   setError]   = useState<string | null>(null)
-  const [noKey,   setNoKey]   = useState(false)
-  const [radius,  setRadius]  = useState(0.5)
-
-  const load = async (r = radius) => {
-    const addrFull = [lead.property_address, lead.city, lead.state ?? 'FL', lead.zip].filter(Boolean).join(', ')
-    setLoading(true); setError(null)
-    try {
-      const p = new URLSearchParams({ address: addrFull, radius: String(r) })
-      if (lead.beds)        p.set('beds', String(lead.beds))
-      if (lead.living_area) p.set('sqft', String(lead.living_area))
-      const res  = await fetch(`/api/mls/comps?${p}`)
-      const data = await res.json()
-      if (!res.ok) {
-        if (data.code === 'NO_CREDENTIALS') setNoKey(true)
-        else setError(data.error ?? 'MLS error')
-      } else {
-        setResult(data as DrawerCompsResult)
-      }
-    } catch { setError('Network error') }
-    finally { setLoading(false) }
-  }
-
-  useEffect(() => { load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
-  if (noKey) {
-    return (
-      <div className="rounded-xl p-5 text-center" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-        <div className="w-10 h-10 rounded-full flex items-center justify-center mx-auto mb-2"
-          style={{ backgroundColor: 'var(--c-hover)' }}>
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--c-text-3)' }}>
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
-          </svg>
-        </div>
-        <p className="text-sm font-bold mb-1" style={{ color: 'var(--c-primary)' }}>Beaches MLS Not Connected</p>
-        <p className="text-xs" style={{ color: 'var(--c-text-3)' }}>
-          Add <code className="px-1 rounded" style={{ backgroundColor: 'var(--c-hover)' }}>RENTCAST_API_KEY</code> to Vercel environment variables to enable live comps.
-        </p>
-      </div>
-    )
-  }
-
-  const RadiusBar = () => (
-    <div className="flex items-center justify-between mb-3">
-      <div className="flex items-center gap-1.5">
-        <span className="text-[9px] font-bold px-2 py-0.5 rounded-full"
-          style={{ backgroundColor: 'rgba(76,175,154,0.12)', color: '#4CAF9A', border: '1px solid rgba(76,175,154,0.25)' }}>
-          {result ? ((result as DrawerCompsResult & { source?: string }).source === 'rentcast' ? 'Rentcast' : 'Beaches MLS') : 'MLS'}
-        </span>
-      </div>
-      <div className="flex items-center gap-1">
-        {[0.25, 0.5, 1].map(r => (
-          <button key={r} onClick={() => { setRadius(r); load(r) }}
-            className="px-2 py-0.5 text-[10px] font-bold rounded-lg transition-all"
-            style={{
-              backgroundColor: radius === r ? 'rgba(201,168,76,0.15)' : 'var(--c-hover)',
-              color:           radius === r ? '#C9A84C' : 'var(--c-text-3)',
-              border:          `1px solid ${radius === r ? 'rgba(201,168,76,0.35)' : 'var(--c-border)'}`,
-            }}>
-            {r}mi
-          </button>
-        ))}
-        <button onClick={() => load()} disabled={loading}
-          className="px-2 py-0.5 text-[10px] font-bold rounded-lg hover:opacity-80 ml-1"
-          style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
-          {loading ? '…' : '↻'}
-        </button>
-      </div>
-    </div>
-  )
-
-  if (loading && !result) {
-    return (
-      <div>
-        <RadiusBar />
-        {[1,2,3].map(i => <div key={i} className="rounded-xl h-16 mb-2 animate-pulse" style={{ backgroundColor: 'var(--c-card)' }} />)}
-      </div>
-    )
-  }
-
-  if (error && !result) {
-    return (
-      <div>
-        <RadiusBar />
-        <div className="rounded-xl p-4 text-center" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-          <p className="text-xs" style={{ color: '#E74C3C' }}>{error}</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (!result) return null
-
-  const { sold, active, pending, median_sold_price, avg_price_per_sqft } = result
-
-  return (
-    <div>
-      <RadiusBar />
-
-      {/* Stats */}
-      {(median_sold_price || avg_price_per_sqft) && (
-        <div className="grid grid-cols-3 gap-2 mb-4">
-          {[
-            { label: 'Median Sold',  value: median_sold_price  ? fmt$(median_sold_price)       : '—', color: '#4CAF9A' },
-            { label: 'Avg $/sqft',   value: avg_price_per_sqft ? `$${avg_price_per_sqft}/sf`   : '—' },
-            { label: 'Comps',        value: `${sold.length}s / ${active.length}a` },
-          ].map(s => (
-            <div key={s.label} className="rounded-xl p-3" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-              <p className="text-[9px] font-bold uppercase tracking-wider mb-0.5" style={{ color: 'var(--c-text-3)' }}>{s.label}</p>
-              <p className="text-sm font-bold" style={{ color: (s as { color?: string }).color ?? 'var(--c-primary)' }}>{s.value}</p>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {sold.length + active.length + pending.length === 0 && (
-        <p className="text-xs text-center py-4" style={{ color: 'var(--c-text-3)' }}>
-          No comps found within {radius}mi — try expanding the radius
-        </p>
-      )}
-
-      {[
-        { label: 'Sold',    items: sold,    color: '#4CAF9A', pk: 'sold_price' as const },
-        { label: 'Active',  items: active,  color: '#C9A84C', pk: 'list_price' as const },
-        { label: 'Pending', items: pending, color: '#7B8FD4', pk: 'list_price' as const },
-      ].map(({ label, items, color, pk }) => items.length > 0 && (
-        <div key={label} className="mb-4">
-          <h4 className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color }}>
-            {label} ({items.length})
-          </h4>
-          <div className="space-y-2">
-            {items.map((c, i) => (
-              <div key={c.mls_number ?? i} className="rounded-lg p-3"
-                style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-                <div className="flex items-start justify-between">
-                  <div className="min-w-0 flex-1 pr-2">
-                    <p className="text-xs font-semibold truncate" style={{ color: 'var(--c-primary)' }}>
-                      {c.address}{c.city ? `, ${c.city}` : ''}
-                    </p>
-                    <p className="text-[10px] mt-0.5" style={{ color: 'var(--c-text-3)' }}>
-                      {[
-                        c.beds        ? `${c.beds}bd`                          : null,
-                        c.baths       ? `${c.baths}ba`                         : null,
-                        c.living_area ? `${c.living_area.toLocaleString()} sf` : null,
-                        c.distance_miles ? `${c.distance_miles}mi`             : null,
-                        c.sold_date   ? new Date(c.sold_date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : null,
-                        c.days_on_market != null ? `${c.days_on_market}d`      : null,
-                      ].filter(Boolean).join(' · ')}
-                    </p>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <p className="text-sm font-bold" style={{ color }}>{fmt$(c[pk])}</p>
-                    {c.price_per_sqft && <p className="text-[10px]" style={{ color: 'var(--c-text-3)' }}>${c.price_per_sqft}/sf</p>}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  )
+function srCacheWrite(key: string, data: CachePayload): void {
+  try { sessionStorage.setItem(key, JSON.stringify({ data, ts: Date.now() })) } catch { /* storage full */ }
 }
 
-// ─── Property Drawer ─────────────────────────────────────────────────────────
+// ─── Single-address result normalizer ────────────────────────────────────────
 
-function PropertyDrawer({
-  lead,
-  onClose,
-  onSave,
-  onCaseNumberUpdate,
-}: {
-  lead: Lead
-  onClose: () => void
-  onSave:  (id: string) => void
-  onCaseNumberUpdate: (id: string, caseNum: string) => void
-}) {
-  const router = useRouter()
-  const [tab, setTab] = useState<DrawerTab>('overview')
-  const [saving, setSaving] = useState(false)
-
-  const isSaved   = Boolean(lead.lead_id || lead.is_lead)
-  const propertyId = isSaved ? (lead.property_id ?? lead.id) : null
-  const days      = daysSince(lead.file_date)
-  const ageClr    = distressAgeColor(days)
-  const countyClerkUrl = COUNTY_CLERK_URLS[lead.county]
-
-  const ltTags = getLeadTypeTags(lead)
-
-  const handleSave = async () => {
-    setSaving(true)
-    await onSave(lead.id)
-    setSaving(false)
+function normalizeSearchResult(r: PropertySearchResult): Lead {
+  return {
+    id:                r.folio ?? `single-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    folio_number:      r.folio ?? '',
+    property_address:  r.property_address ?? '',
+    city:              r.city ?? '',
+    zip:               r.zip ?? '',
+    county:            r.county ?? '',
+    owner_name:        r.owner_name ?? '',
+    mailing_address:   r.mailing_address ?? '',
+    market_value:      r.market_value ?? null,
+    assessed_value:    r.assessed_value ?? null,
+    land_value:        r.land_value ?? null,
+    beds:              r.beds ?? null,
+    baths:             r.baths ?? null,
+    living_area:       r.living_area ?? null,
+    year_built:        r.year_built ?? null,
+    equity_tier:       null,
+    equity_percentage: null,
+    is_pre_foreclosure: Boolean(r.distress),
+    is_probate:        false,
+    is_tax_deed:       false,
+    is_auction:        false,
+    multiple_liens:    false,
+    free_clear:        false,
+    vacant:            false,
+    absentee_owner:    r.absentee_owner ?? false,
+    data_source:       r.source_display ?? r.source ?? 'REAPI',
+    pa_url:            r.pa_url ?? null,
+    phone_1:           null,
+    pipeline_stage:    null,
+    lead_score:        null,
+    case_number:       r.distress?.case_number ?? null,
+    file_date:         r.distress?.file_date ?? null,
+    last_sale_date:    r.last_sale_date ?? null,
+    last_sale_amount:  r.last_sale_amount ?? null,
+    subdivision:       r.subdivision ?? null,
+    property_use:      r.property_use ?? null,
+    annual_taxes:      r.annual_taxes ?? null,
+    is_lead:           false,
+    lead_id:           null,
   }
+}
 
-  // Filter out synthetic REAPI- ids for navigation
-  const canNavigate = isSaved && propertyId && !String(propertyId).startsWith('REAPI-')
+// ─── UUID check (determines if a result is already in the DB) ────────────────
 
-  return (
-    <>
-      {/* Backdrop */}
-      <div
-        className="fixed inset-0 z-40"
-        style={{ backgroundColor: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(2px)' }}
-        onClick={onClose}
-      />
-
-      {/* Drawer */}
-      <div
-        className="fixed right-0 top-0 bottom-0 z-50 flex flex-col overflow-hidden"
-        style={{
-          width: 'min(480px, 95vw)',
-          backgroundColor: 'var(--c-bg)',
-          borderLeft: '1px solid var(--c-border)',
-          boxShadow: '-4px 0 32px rgba(0,0,0,0.4)',
-        }}
-      >
-        {/* Header */}
-        <div className="px-5 py-4 flex items-start justify-between gap-3"
-          style={{ backgroundColor: 'var(--c-card)', borderBottom: '1px solid var(--c-border)' }}>
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-bold truncate" style={{ color: 'var(--c-primary)' }}>
-              {lead.property_address || '—'}
-            </p>
-            <p className="text-xs mt-0.5" style={{ color: 'var(--c-text-3)' }}>
-              {lead.city}{lead.zip ? `, FL ${lead.zip}` : ''} · {lead.county === 'miami-dade' ? 'Miami-Dade' : lead.county === 'broward' ? 'Broward' : lead.county === 'palm-beach' ? 'Palm Beach' : lead.county}
-            </p>
-            <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
-              {ltTags.map(t => (
-                <span key={t.label} className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
-                  style={{ backgroundColor: `${t.color}20`, color: t.color }}>{t.label}</span>
-              ))}
-              {isSaved && (
-                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
-                  style={{ backgroundColor: 'rgba(76,175,154,0.15)', color: '#4CAF9A' }}>✓ In Contacts</span>
-              )}
-            </div>
-          </div>
-          <button onClick={onClose}
-            className="shrink-0 text-lg leading-none hover:opacity-60"
-            style={{ color: 'var(--c-text-3)' }}>✕</button>
-        </div>
-
-        {/* Tabs */}
-        <div className="flex px-5 pt-3 gap-1"
-          style={{ backgroundColor: 'var(--c-card)', borderBottom: '1px solid var(--c-border)' }}>
-          {([['overview', 'Overview'], ['case', 'Case Details'], ['comps', 'Comps']] as [DrawerTab, string][]).map(([k, label]) => (
-            <button key={k} onClick={() => setTab(k)}
-              className="text-xs font-semibold px-3 py-2 rounded-t-lg transition-colors"
-              style={{
-                color: tab === k ? '#C9A84C' : 'var(--c-text-3)',
-                borderBottom: `2px solid ${tab === k ? '#C9A84C' : 'transparent'}`,
-                backgroundColor: tab === k ? 'rgba(201,168,76,0.06)' : 'transparent',
-              }}>
-              {label}
-            </button>
-          ))}
-        </div>
-
-        {/* Tab content */}
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-
-          {/* ── OVERVIEW ── */}
-          {tab === 'overview' && (
-            <>
-              {/* Key stats */}
-              <div className="grid grid-cols-3 gap-3">
-                {[
-                  { label: 'Est. Value',  value: fmt$(lead.market_value || lead.assessed_value), color: 'var(--c-primary)' },
-                  { label: 'Equity',      value: lead.equity_tier ?? '—', color: EQUITY_COLORS[lead.equity_tier] ?? '#9ca3af' },
-                  { label: 'Filed',       value: days !== null ? `${days}d` : '—', color: ageClr },
-                ].map(s => (
-                  <div key={s.label} className="rounded-xl p-3" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-                    <p className="text-[10px] font-semibold uppercase tracking-wider mb-1" style={{ color: 'var(--c-text-3)' }}>{s.label}</p>
-                    <p className="text-base font-bold" style={{ color: s.color }}>{s.value}</p>
-                  </div>
-                ))}
-              </div>
-
-              {/* Owner */}
-              <div className="rounded-xl p-4 space-y-0.5" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-                <h4 className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--c-text-2)' }}>Owner</h4>
-                <DRow label="Owner Name"  value={lead.owner_name || lead.mortgagor} />
-                <DRow label="Entity Type" value={lead.entity_type} />
-                <DRow label="Homestead"   value={lead.homestead ? '✓ Owner-Occupied' : 'No'} />
-                <DRow label="Absentee"    value={lead.absentee_owner ? '✓ Yes' : null} />
-              </div>
-
-              {/* Property */}
-              <div className="rounded-xl p-4" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-                <h4 className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--c-text-2)' }}>Property</h4>
-                <DRow label="Beds / Baths" value={[lead.beds && `${lead.beds} bd`, lead.baths && `${lead.baths} ba`].filter(Boolean).join(' · ') || null} />
-                <DRow label="Living Area"  value={lead.living_area ? `${Number(lead.living_area).toLocaleString()} sqft` : null} />
-                <DRow label="Year Built"   value={lead.year_built} />
-                <DRow label="Type"         value={lead.property_type} />
-                <DRow label="Lender"       value={lead.lender_name} />
-                <DRow label="Loan Balance" value={lead.known_debt ? fmt$(lead.known_debt) : null} />
-              </div>
-            </>
-          )}
-
-          {/* ── COMPS ── */}
-          {tab === 'comps' && (
-            <DrawerComps lead={lead} />
-          )}
-
-          {/* ── CASE DETAILS ── */}
-          {tab === 'case' && (
-            <div className="rounded-xl p-4" style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-              <h4 className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--c-text-2)' }}>Case Details</h4>
-
-              <DrawerCaseNumberRow
-                propertyId={propertyId}
-                initialValue={lead.case_number ?? null}
-                onSaved={val => onCaseNumberUpdate(lead.id, val)}
-              />
-
-              <DRow label="Folio / APN"  value={<span className="font-mono text-xs">{lead.folio_number}</span>} />
-              <DRow label="Date Filed"   value={lead.file_date ? new Date(lead.file_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : null} />
-              <DRow label="Case Type"    value={
-                lead.foreclosure_type === 'P' ? 'Pre-Foreclosure (Lis Pendens)'
-                : lead.foreclosure_type === 'F' ? 'Foreclosure'
-                : lead.foreclosure_type === 'A' ? 'Auction'
-                : lead.foreclosure_type
-              } />
-              <DRow label="Plaintiff"    value={lead.plaintiff} />
-              <DRow label="Lender"       value={lead.lender_name} />
-              <DRow label="Loan Balance" value={lead.known_debt ? fmt$(lead.known_debt) : null} />
-              <DRow label="Data Source"  value={lead.data_source} />
-
-              {!isSaved && (
-                <p className="text-xs mt-4 px-3 py-2 rounded-lg"
-                  style={{ backgroundColor: 'rgba(201,168,76,0.08)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.2)' }}>
-                  ⚡ Case number will be looked up from REAPI when you save this property.
-                </p>
-              )}
-
-              {countyClerkUrl && (
-                <a href={countyClerkUrl} target="_blank" rel="noopener noreferrer"
-                  className="flex items-center gap-2 mt-4 text-xs font-semibold px-3 py-2 rounded-lg hover:opacity-80"
-                  style={{ backgroundColor: 'rgba(201,168,76,0.1)', color: '#C9A84C', border: '1px solid rgba(201,168,76,0.3)' }}>
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                  </svg>
-                  Verify on {lead.county === 'miami-dade' ? 'Miami-Dade' : lead.county === 'broward' ? 'Broward' : 'Palm Beach'} Clerk →
-                </a>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Footer actions */}
-        <div className="px-5 py-4 flex gap-3"
-          style={{ backgroundColor: 'var(--c-card)', borderTop: '1px solid var(--c-border)' }}>
-          {canNavigate ? (
-            <button onClick={() => router.push(`/leads/${propertyId}`)}
-              className="flex-1 text-sm font-bold py-2.5 rounded-xl hover:opacity-80"
-              style={{ backgroundColor: '#C9A84C', color: '#0A1F44' }}>
-              Open Full Lead →
-            </button>
-          ) : !isSaved ? (
-            <button onClick={handleSave} disabled={saving}
-              className="flex-1 text-sm font-bold py-2.5 rounded-xl hover:opacity-80 disabled:opacity-50"
-              style={{ backgroundColor: '#C9A84C', color: '#0A1F44' }}>
-              {saving ? 'Saving…' : '+ Save to Contacts'}
-            </button>
-          ) : null}
-          <button onClick={onClose}
-            className="px-4 text-sm font-semibold py-2.5 rounded-xl hover:opacity-80"
-            style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
-            Close
-          </button>
-        </div>
-      </div>
-    </>
-  )
+function isDbUUID(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
 }
 
 // ─── Row component ────────────────────────────────────────────────────────────
@@ -825,6 +407,7 @@ function ResultRow({
 export default function SearchResultsClient() {
   const router     = useRouter()
   const rawParams  = useSearchParams()
+  const isSingleMode = rawParams.get('mode') === 'single'
 
   const [leads, setLeads]     = useState<Lead[]>([])
   const [total, setTotal]     = useState(0)
@@ -832,15 +415,15 @@ export default function SearchResultsClient() {
   const [pages, setPages]     = useState(1)
   const [loading, setLoading] = useState(true)
 
-  const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [sortBy, setSortBy]     = useState<'file_date' | 'equity_percentage' | 'market_value'>('file_date')
-  const [sortDir, setSortDir]   = useState<'desc' | 'asc'>('desc')
-  const [cached, setCached]     = useState<boolean | null>(null)
-  const [error, setError]       = useState<string | null>(null)
-  const [dbFallback, setDbFallback] = useState<string | null>(null)  // warning msg when showing saved DB results
-  const [drawerLead, setDrawerLead] = useState<Lead | null>(null)
+  const [selected, setSelected]   = useState<Set<string>>(new Set())
+  const [sortBy, setSortBy]       = useState<'file_date' | 'equity_percentage' | 'market_value'>('file_date')
+  const [sortDir, setSortDir]     = useState<'desc' | 'asc'>('desc')
+  const [cached, setCached]       = useState<boolean | null>(null)
+  const [error, setError]         = useState<string | null>(null)
+  const [dbFallback, setDbFallback] = useState<string | null>(null)
+  const [navigating, setNavigating] = useState<string | null>(null)
 
-  // ── Fetch — calls live REAPI search API (with smart caching) ─────────────
+  // ── Fetch — single-address lookup or live bulk search, with sessionStorage cache ──
 
   const fetchResults = useCallback(async (p = 1) => {
     setLoading(true)
@@ -852,33 +435,93 @@ export default function SearchResultsClient() {
     params.set('sort_by',  sortBy)
     params.set('sort_dir', sortDir)
 
+    const key = srCacheKey(params)
+    const hit = srCacheRead(key)
+    if (hit) {
+      setLeads(hit.properties)
+      setTotal(hit.total)
+      setPage(hit.page)
+      setPages(hit.pages)
+      if (hit.db_fallback) setDbFallback(hit.db_fallback)
+      setCached(true)
+      setLoading(false)
+      return
+    }
+
     try {
-      const res  = await fetch(`/api/property-search/live?${params}`)
-      const data = await res.json()
-
-      if (!res.ok) {
-        setError(data.error ?? 'Search failed')
-        setLeads([])
-        setTotal(0)
-        return
+      if (isSingleMode) {
+        const q   = rawParams.get('q') ?? ''
+        const res = await fetch(`/api/property-search?q=${encodeURIComponent(q)}`)
+        const data = await safeJson(res)
+        if (!res.ok || !data?.success) {
+          const msg = (data?.error as { message?: string } | null)?.message ?? 'Property not found'
+          setError(msg); setLeads([]); setTotal(0); return
+        }
+        const raw: PropertySearchResult | undefined = (data.results as PropertySearchResult[])?.[0]
+        if (!raw || !raw.property_address) { setLeads([]); setTotal(0); setPages(1); return }
+        const normalized = normalizeSearchResult(raw)
+        const payload: CachePayload = { properties: [normalized], total: 1, page: 1, pages: 1 }
+        setLeads(payload.properties)
+        setTotal(payload.total)
+        setPage(1)
+        setPages(1)
+        setCached(false)
+        srCacheWrite(key, payload)
+      } else {
+        const res  = await fetch(`/api/property-search/live?${params}`)
+        const data = await safeJson(res)
+        if (!res.ok || !data?.success) {
+          const msg = (data?.error as { message?: string } | null)?.message ?? 'Search failed'
+          setError(msg); setLeads([]); setTotal(0); return
+        }
+        const pagination = data.pagination as { page: number; pageSize: number; totalPages: number } | null
+        const payload: CachePayload = {
+          properties: (data.results as Lead[]) || [],
+          total:      (data.count as number)   || 0,
+          page:       pagination?.page          ?? 1,
+          pages:      pagination?.totalPages    ?? 1,
+        }
+        setLeads(payload.properties)
+        setTotal(payload.total)
+        setPage(payload.page)
+        setPages(payload.pages)
+        setCached((data.cached as boolean) ?? false)
+        srCacheWrite(key, payload)
       }
-
-      // DB fallback: REAPI unavailable — show warning banner but still render results
-      if (data.db_fallback) {
-        setDbFallback(data.warning ?? 'Showing saved properties — live search unavailable.')
-      }
-
-      setLeads(data.properties || [])
-      setTotal(data.total || 0)
-      setPage(data.page  || 1)
-      setPages(data.pages || 1)
-      setCached(data.cached ?? false)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Network error')
     } finally { setLoading(false) }
-  }, [rawParams, sortBy, sortDir])
+  }, [rawParams, sortBy, sortDir, isSingleMode])
 
   useEffect(() => { fetchResults(1) }, [sortBy, sortDir]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Navigation ────────────────────────────────────────────────────────────
+
+  const navigateToProperty = useCallback(async (lead: Lead) => {
+    if (navigating) return
+    setNavigating(lead.id)
+    try {
+      if (isDbUUID(lead.id)) {
+        router.push(`/properties/${lead.id}`)
+        return
+      }
+      // Live/folio result — upsert to DB to get a canonical property_id
+      const res = await fetch('/api/properties/upsert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ property: lead }),
+      })
+      if (res.ok) {
+        const { property_id } = await res.json()
+        router.push(`/properties/${property_id}`)
+      } else {
+        // Fallback: navigate with folio as ID (server will handle lookup)
+        router.push(`/properties/${lead.folio_number || lead.id}`)
+      }
+    } catch {
+      setNavigating(null)
+    }
+  }, [navigating, router])
 
   // ── Actions ──────────────────────────────────────────────────────────────
 
@@ -898,19 +541,11 @@ export default function SearchResultsClient() {
     })
     if (res.ok) {
       const { lead_id, property_id } = await res.json()
-      // Update both the list and the open drawer
       setLeads(prev => prev.map(l => l.id === id
         ? { ...l, lead_id, id: property_id, is_lead: true }
         : l
       ))
-      setDrawerLead(prev => prev?.id === id ? { ...prev, lead_id, id: property_id, is_lead: true } : prev)
     }
-  }
-
-  /** Update case number in local state after manual edit */
-  const handleCaseNumberUpdate = (id: string, caseNum: string) => {
-    setLeads(prev => prev.map(l => l.id === id ? { ...l, case_number: caseNum } : l))
-    setDrawerLead(prev => prev?.id === id ? { ...prev, case_number: caseNum } : prev)
   }
 
   const bulkAddToLeads = async () => {
@@ -948,7 +583,6 @@ export default function SearchResultsClient() {
         {/* Top row */}
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3">
-            {/* Back button */}
             <button onClick={() => router.push('/property-search')}
               className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl hover:opacity-80"
               style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
@@ -958,7 +592,9 @@ export default function SearchResultsClient() {
             <div>
               <h1 className="text-lg font-bold" style={{ color: 'var(--c-primary)' }}>Search Results</h1>
               <p className="text-xs flex items-center gap-2" style={{ color: 'var(--c-text-3)' }}>
-                {loading ? (dbFallback ? 'Searching saved properties…' : 'Querying live market…') : `${total.toLocaleString()} propert${total === 1 ? 'y' : 'ies'}`}
+                {loading
+                  ? (isSingleMode ? 'Looking up property…' : dbFallback ? 'Searching saved properties…' : 'Querying live market…')
+                  : `${total.toLocaleString()} propert${total === 1 ? 'y' : 'ies'}`}
                 {!loading && (
                   <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
                     style={{
@@ -974,7 +610,6 @@ export default function SearchResultsClient() {
             </div>
           </div>
 
-          {/* Actions */}
           <div className="flex items-center gap-2">
             <button onClick={exportCSV}
               className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl hover:opacity-80"
@@ -1005,6 +640,35 @@ export default function SearchResultsClient() {
             style={{ backgroundColor: '#C9A84C', color: '#0A1F44' }}>
             Add Funds
           </a>
+        </div>
+      )}
+
+      {/* ── Single-address mode banner ────────────────────────────────────── */}
+      {isSingleMode && !loading && (
+        <div className="px-5 py-2.5 flex items-center gap-3"
+          style={{ backgroundColor: 'rgba(106,189,224,0.08)', borderBottom: '1px solid rgba(106,189,224,0.2)' }}>
+          <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: '#6ABDE0' }}>
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11A6 6 0 105 11a6 6 0 0012 0z"/>
+          </svg>
+          <div className="flex-1 min-w-0">
+            <p className="text-[11px] font-bold" style={{ color: '#6ABDE0' }}>Single Property Lookup</p>
+            <p className="text-[10px] mt-0.5 truncate" style={{ color: 'var(--c-text-3)' }}>{rawParams.get('q') ?? ''}</p>
+          </div>
+          <button onClick={() => router.push('/property-search')}
+            className="text-[10px] font-semibold px-2.5 py-1 rounded-lg shrink-0 hover:opacity-80"
+            style={{ backgroundColor: 'var(--c-hover)', color: 'var(--c-text-2)', border: '1px solid var(--c-border)' }}>
+            New Search
+          </button>
+        </div>
+      )}
+
+      {/* ── Navigating overlay ────────────────────────────────────────────── */}
+      {navigating && (
+        <div className="px-5 py-2 flex items-center gap-2"
+          style={{ backgroundColor: 'rgba(201,168,76,0.08)', borderBottom: '1px solid rgba(201,168,76,0.2)' }}>
+          <div className="w-3 h-3 border-2 border-t-transparent rounded-full animate-spin shrink-0"
+            style={{ borderColor: '#C9A84C', borderTopColor: 'transparent' }} />
+          <p className="text-[11px] font-semibold" style={{ color: '#C9A84C' }}>Opening property workspace…</p>
         </div>
       )}
 
@@ -1070,8 +734,12 @@ export default function SearchResultsClient() {
             <div className="text-center">
               <div className="w-8 h-8 border-2 border-t-transparent rounded-full animate-spin mx-auto mb-3"
                 style={{ borderColor: '#C9A84C', borderTopColor: 'transparent' }} />
-              <p className="text-sm font-semibold" style={{ color: 'var(--c-primary)' }}>Searching live market…</p>
-              <p className="text-xs mt-1" style={{ color: 'var(--c-text-3)' }}>Querying RealEstateAPI</p>
+              <p className="text-sm font-semibold" style={{ color: 'var(--c-primary)' }}>
+                {isSingleMode ? 'Looking up property…' : 'Searching live market…'}
+              </p>
+              <p className="text-xs mt-1" style={{ color: 'var(--c-text-3)' }}>
+                {isSingleMode ? 'Querying property records' : 'Querying RealEstateAPI'}
+              </p>
             </div>
           </div>
         ) : error ? (
@@ -1109,8 +777,14 @@ export default function SearchResultsClient() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-4.35-4.35M17 11A6 6 0 105 11a6 6 0 0012 0z"/>
                 </svg>
               </div>
-              <p className="text-sm font-bold" style={{ color: 'var(--c-primary)' }}>No properties match your criteria</p>
-              <p className="text-xs mt-1 mb-5" style={{ color: 'var(--c-text-3)' }}>Try broadening your search or removing some filters</p>
+              <p className="text-sm font-bold" style={{ color: 'var(--c-primary)' }}>
+                {isSingleMode ? 'Property not found' : 'No properties match your criteria'}
+              </p>
+              <p className="text-xs mt-1 mb-5" style={{ color: 'var(--c-text-3)' }}>
+                {isSingleMode
+                  ? 'No record found for that address. Try a different address or check the spelling.'
+                  : 'Try broadening your search or removing some filters'}
+              </p>
               <button onClick={() => router.push('/property-search')}
                 className="text-sm font-bold px-4 py-2 rounded-xl hover:opacity-80"
                 style={{ backgroundColor: 'var(--c-primary)', color: '#C9A84C' }}>
@@ -1139,7 +813,7 @@ export default function SearchResultsClient() {
                     lead={lead}
                     selected={selected.has(lead.id)}
                     onSelect={toggleSelect}
-                    onClick={id => setDrawerLead(leads.find(l => l.id === id) ?? null)}
+                    onClick={id => { const l = leads.find(l => l.id === id); if (l) navigateToProperty(l) }}
                     onAddToLeads={addToLeads}
                   />
                 ))}
@@ -1167,16 +841,6 @@ export default function SearchResultsClient() {
           </div>
         )}
       </div>
-
-      {/* ── Property Detail Drawer ─────────────────────────────────────── */}
-      {drawerLead && (
-        <PropertyDrawer
-          lead={drawerLead}
-          onClose={() => setDrawerLead(null)}
-          onSave={addToLeads}
-          onCaseNumberUpdate={handleCaseNumberUpdate}
-        />
-      )}
     </div>
   )
 }
