@@ -40,11 +40,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Property not found' }, { status: 404 })
   }
 
-  // Check if a lead record exists and is already imported
+  // Check if a lead record exists and is already imported (scoped to this user)
   const { data: lead } = await service
     .from('leads')
     .select('id, imported_to_contact')
     .eq('property_id', lead_id)
+    .eq('user_id', user.id)
     .maybeSingle()
 
   if (lead?.imported_to_contact) {
@@ -123,10 +124,12 @@ export async function POST(req: NextRequest) {
         updated_at:          new Date().toISOString(),
       })
       .eq('property_id', lead_id)
+      .eq('user_id', user.id)
   } else {
     // Create lead record if it doesn't exist yet
     await service.from('leads').insert([{
       property_id:         lead_id,
+      user_id:             user.id,
       status:              'reviewing',
       source:              property.source || 'manual',
       imported_to_contact: contactId,

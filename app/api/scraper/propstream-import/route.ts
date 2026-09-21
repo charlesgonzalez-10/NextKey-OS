@@ -161,6 +161,7 @@ export async function POST(request: NextRequest) {
       // Create a lead record
       await supabase.from('leads').insert([{
         property_id: newProperty.id,
+        user_id:     user.id,
         status:      'new',
         source:      'csv_import',
       }]).then(({ error }) => {

@@ -247,6 +247,7 @@ export async function GET(req: NextRequest) {
     const { data: leadsData } = await supabase
       .from('leads')
       .select('property_id, id, status, pipeline_stage, starred, lead_score, ai_score, imported_to_contact, source, notes, call_status, sms_status, email_status, offer_sent, offer_pct, offer_amount, blocked, created_at, acquisition_pipeline, surplus_status, follow_up_at, last_contact_at, assigned_to')
+      .eq('user_id', user.id)
       .in('property_id', propIds)
 
     if (leadsData) {

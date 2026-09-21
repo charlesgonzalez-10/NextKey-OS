@@ -38,11 +38,12 @@ export async function POST(
     return NextResponse.json({ error: 'Property not found' }, { status: 404 })
   }
 
-  // Check for existing lead record
+  // Check for existing lead record (scoped to this user)
   const { data: existing } = await service
     .from('leads')
     .select('id, status')
     .eq('property_id', id)
+    .eq('user_id', user.id)
     .maybeSingle()
 
   if (existing) {
@@ -62,6 +63,7 @@ export async function POST(
     .from('leads')
     .insert([{
       property_id: id,
+      user_id:     user.id,
       status:      'new',
       source,
     }])
@@ -90,6 +92,7 @@ export async function DELETE(
     .from('leads')
     .update({ status: 'dead', updated_at: new Date().toISOString() })
     .eq('property_id', id)
+    .eq('user_id', user.id)
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
   return NextResponse.json({ ok: true })
